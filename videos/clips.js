@@ -3,7 +3,7 @@
 export const clips = {
   walkway: { file: './videos/walkway.mp4?v=1fdba0f9', credit: '"People Walking Free Stock Footage, Royalty-Free No Copyright Content", Montreal Walking Tours, on YouTube.',
     geometry: { line: { ax: .26, ay: .02, bx: .26, by: 1 }, zone: { x1: .81, y1: .11, x2: 1, y2: 1 } }, inSide: 1, stopSeconds: 5 },
-  doorway: { file: './videos/doorway.mp4?v=40d203fe', credit: '"The CCTV People Demo 1", CCTV People, on YouTube. The shop door is at the top of the picture.',
+  doorway: { file: './videos/doorway.mp4?v=ca6b31f1', credit: '"The CCTV People Demo 1", CCTV People, on YouTube. The shop door is at the top of the picture.',
     geometry: { line: { ax: .05, ay: .50, bx: .75, by: .50 } }, inSide: -1, stopSeconds: 5 },
   counter: { file: './videos/counter.mp4?v=4a9c697e', credit: '"HD-SDI 1080P Hi Definition Megapixel Security Camera @ Super Market Checkout Sample #1", www.CCTVFACTORY.com, on YouTube. The box covers where shoppers stand at the middle till.',
     geometry: { zone: { x1: .49, y1: .02, x2: .66, y2: .80 } }, inSide: 1, stopSeconds: 5 },
