@@ -2,9 +2,9 @@
 // Sources and licences: SOURCES.md beside this file. Geometry was placed by eye on each clip.
 export const clips = {
   walkway: { file: './videos/walkway.mp4', credit: '"People Walking Free Stock Footage, Royalty-Free No Copyright Content", Montreal Walking Tours, on YouTube.',
-    geometry: { line: { ax: .02, ay: .62, bx: .98, by: .62 }, zone: { x1: .84, y1: .28, x2: .99, y2: .55 } }, inSide: 1, stopSeconds: 5 },
+    geometry: { line: { ax: .26, ay: .02, bx: .26, by: 1 }, zone: { x1: .81, y1: .11, x2: 1, y2: 1 } }, inSide: 1, stopSeconds: 5 },
   doorway: { file: './videos/doorway.mp4', credit: '"The CCTV People Demo 1", CCTV People, on YouTube. The shop door is at the top of the picture.',
-    geometry: { line: { ax: .05, ay: .55, bx: .75, by: .55 } }, inSide: -1, stopSeconds: 5 },
+    geometry: { line: { ax: .05, ay: .50, bx: .75, by: .50 } }, inSide: -1, stopSeconds: 5 },
   counter: { file: './videos/counter.mp4', credit: '"HD-SDI 1080P Hi Definition Megapixel Security Camera @ Super Market Checkout Sample #1", www.CCTVFACTORY.com, on YouTube. The box covers where shoppers stand at the middle till.',
     geometry: { zone: { x1: .49, y1: .02, x2: .66, y2: .80 } }, inSide: 1, stopSeconds: 5 },
   shelf:   { file: './videos/shelf.mp4',   credit: '"HD CCTV Camera video 3MP 4MP iProx CCTV HDCCTVCameras.net retail store", HDCCTV Cameras, on YouTube.',
