@@ -1,0 +1,5 @@
+A prototype. It counts people in a camera picture inside your browser. No picture is stored or sent.
+
+Open-source parts:
+- YOLOX person detection models, Apache-2.0, Megvii Inc. (models/YOLOX-LICENSE.txt)
+- ONNX Runtime Web 1.31.1, MIT, Microsoft Corporation (vendor/ort/)
