@@ -47,7 +47,7 @@
 <button id="flip-inside" class="chip" hidden>Flip inside</button>
 <button id="add-table" class="chip" hidden>Add a table</button>
 </div>
-<p id="live" class="live">Counting 0 pictures a second</p>
+<p id="live" class="live">Getting the counter ready</p>
 <p class="promise"><svg aria-hidden="true"><use href="#lock"/></svg><span>0 pictures stored. 0 sent.</span></p>
 <div class="controls"><button id="switch-camera" class="chip" hidden>Switch camera</button><button id="more" class="chip">More</button></div>
 <button id="stop-camera" class="btn quiet">Stop and turn the camera off</button>
@@ -71,7 +71,19 @@
 <h2 id="more-title" class="sheet-title">More</h2>
 <label for="model-choice">Counter</label>
 <select id="model-choice"><option value="nano">Fastest (4 MB)</option><option value="tiny" selected>Balanced (20 MB)</option><option value="s">Most accurate (36 MB)</option></select>
-<p id="backend-label">Counter is getting ready.</p><button id="close-more" class="btn quiet">Done</button>
+<p id="backend-label">Counter is getting ready.</p>
+<h3>Details</h3>
+<dl class="details">
+<div><dt>Counter in use</dt><dd id="detail-backend">Getting ready</dd></div>
+<div><dt>Model</dt><dd id="detail-model">Choosing for this device</dd></div>
+<div><dt>Camera picture size</dt><dd id="detail-size">Waiting for the camera</dd></div>
+<div><dt>Pictures the camera has delivered</dt><dd id="detail-seen">0</dd></div>
+<div><dt>Pictures counted</dt><dd id="detail-counted">0</dd></div>
+<div><dt>Pictures a second</dt><dd id="detail-rate">0.0</dd></div>
+<div><dt>Time for the last count</dt><dd id="detail-run">No count yet</dd></div>
+<div id="detail-problem-row" hidden><dt>Last problem</dt><dd id="detail-problem"></dd></div>
+</dl>
+<button id="close-more" class="btn quiet">Done</button>
 </dialog>
 <script nomodule>document.getElementById('status').textContent = 'This browser cannot run the counter; open this page in a current browser.';</script>
 </body></html>

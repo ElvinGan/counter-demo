@@ -17,15 +17,21 @@ async function loadModel(model) {
 }
 export const modelSizes = { nano: '4 MB', tiny: '20 MB', s: '36 MB' };
 export async function createRunner(model, options = {}) {
-  let data;
-  try { data = await (options.loadModel ?? loadModel)(model); }
-  catch (cause) { throw Object.assign(new Error('Model download failed', { cause }), { code: 'MODEL_DOWNLOAD' }); }
+  const modelChosen = options.modelChosen ?? Boolean(model);
   const loadGPU = options.loadGPU ?? (() => import('../vendor/ort/ort.webgpu.min.mjs'));
   const loadWasm = options.loadWasm ?? (() => import('../vendor/ort/ort.wasm.min.mjs'));
   const gpu = options.gpu ?? globalThis.navigator?.gpu;
   const isolated = options.isolated ?? globalThis.crossOriginIsolated;
-  let runtime, session, backend, inputW, inputH;
+  const startTimer = options.setTimeout ?? globalThis.setTimeout;
+  const cancelTimer = options.clearTimeout ?? globalThis.clearTimeout;
+  let runtime, session, backend, inputW, inputH, lastProblem = '', unusable = false;
+  function problem(message) { lastProblem = message; options.onProblem?.(message); }
   async function open(provider) {
+    model ??= provider === 'webgpu' ? 'tiny' : 'nano';
+    options.onLoading?.(model);
+    let data;
+    try { data = await (options.loadModel ?? loadModel)(model); }
+    catch (cause) { throw Object.assign(new Error('Model download failed', { cause }), { code: 'MODEL_DOWNLOAD' }); }
     runtime = await (provider === 'webgpu' ? loadGPU() : loadWasm());
     runtime.env.wasm.wasmPaths = new URL('../vendor/ort/', import.meta.url).href;
     runtime.env.wasm.numThreads = isolated ? Math.min(4, globalThis.navigator?.hardwareConcurrency || 2) : 1;
@@ -37,7 +43,7 @@ export async function createRunner(model, options = {}) {
     session = await runtime.InferenceSession.create(data, sessionOptions);
     const shape = session.inputMetadata[0]?.shape;
     if (!shape || shape.length !== 4 || shape[0] !== 1 || shape[1] !== 3 || !shape.slice(2).every(n => Number.isInteger(n) && n > 0)) {
-      await session.release(); session = null; throw new Error('Unsupported model shape');
+      await release(); throw new Error('Unsupported model shape');
     }
     inputH = shape[2]; inputW = shape[3]; backend = provider;
   }
@@ -45,32 +51,63 @@ export async function createRunner(model, options = {}) {
     const previous = session; session = null;
     if (previous) await previous.release();
   }
+  async function fallback(error) {
+    // A lost GPU can also hang in release. Retire it without blocking the WASM attempt.
+    void release().catch(() => {});
+    const switched = !modelChosen && model !== 'nano';
+    if (switched) model = 'nano';
+    problem((error.code === 'RUN_TIMEOUT' ? 'WebGPU took more than 8 seconds for a picture.' : 'WebGPU could not run the counter.') +
+      (switched ? ' Switched to Fastest on WASM.' : ' Using WASM instead.'));
+    await open('wasm');
+  }
   let available = false;
   try { available = Boolean(gpu && await gpu.requestAdapter()); } catch {}
   if (available) {
     try { await open('webgpu'); }
-    catch { await release().catch(() => {}); await open('wasm'); }
-  } else await open('wasm');
+    catch (error) { if (error.code === 'MODEL_DOWNLOAD') throw error; await fallback(error); }
+  } else {
+    if (!modelChosen) model = 'nano';
+    await open('wasm');
+  }
   async function infer(pixels) {
-    const input = new runtime.Tensor('float32', pixels, [1, 3, inputH, inputW]);
+    // Capture these before awaiting: an abandoned run may finish after fallback replaced them.
+    const active = session;
+    const input = new runtime.Tensor('float32', typeof pixels === 'function' ? pixels() : pixels, [1, 3, inputH, inputW]);
     let output;
     try {
-      output = await session.run({ [session.inputNames[0]]: input });
-      return new Float32Array(output[session.outputNames[0]].data);
+      output = await active.run({ [active.inputNames[0]]: input });
+      return new Float32Array(output[active.outputNames[0]].data);
     } finally {
       input.dispose?.();
       if (output) for (const tensor of Object.values(output)) tensor.dispose?.();
     }
   }
+  async function timedInfer(pixels) {
+    let timer;
+    const deadline = new Promise((resolve, reject) => {
+      timer = startTimer(() => reject(Object.assign(new Error('This device is taking more than 8 seconds a picture. Open More and choose Fastest.'), { code: 'RUN_TIMEOUT' })), 8000);
+    });
+    try { return await Promise.race([infer(pixels), deadline]); }
+    finally { cancelTimer(timer); }
+  }
+  async function wasmInfer(pixels) {
+    try { return await timedInfer(pixels); }
+    catch (error) {
+      if (error.code === 'RUN_TIMEOUT') {
+        unusable = true;
+        void release().catch(() => {});
+      }
+      throw error;
+    }
+  }
   return {
+    get model() { return model; }, get lastProblem() { return lastProblem; },
     get backend() { return backend; }, get inputW() { return inputW; }, get inputH() { return inputH; },
     async run(pixels) {
-      try { return await infer(pixels); }
-      catch (error) {
-        if (backend !== 'webgpu') throw error;
-        await release().catch(() => {}); await open('wasm');
-        return infer(pixels);
-      }
+      if (unusable || !session) throw new Error('The counter needs to be restarted.');
+      if (backend === 'wasm') return wasmInfer(pixels);
+      try { return await timedInfer(pixels); }
+      catch (error) { await fallback(error); return wasmInfer(pixels); }
     }, release,
   };
 }

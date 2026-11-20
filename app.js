@@ -3,23 +3,25 @@ import { Tracker } from './engine/tracker.js';
 import { createRunner, modelSizes } from './ui/model.js';
 import { initialGeometry, pixelGeometry, makeCounters, nextTableBox } from './ui/counts.js';
 import { geometryEditor, drawOverlay } from './ui/geometry.js';
-import { pictureRate, fallbackNewPicture, pictureTime, containedPicture } from './ui/pictures.js';
+import { pictureRate, fallbackNewPicture, containedPicture } from './ui/pictures.js';
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay');
 const titles = { walkway: 'Walkway', doorway: 'Doorway', counter: 'Counter', shelf: 'Shelf', tables: 'Tables' };
 const params = new URLSearchParams(location.search);
-let model = Object.hasOwn(modelSizes, params.get('model')) ? params.get('model') : 'tiny';
+let modelChosen = Object.hasOwn(modelSizes, params.get('model'));
+let model = modelChosen ? params.get('model') : undefined;
 let stopSeconds = [5,10,30,60].includes(Number(params.get('stop'))) ? Number(params.get('stop')) : 10;
 let screen = 'start', spot = null, cameraOn = false, backend = 'wasm';
-let picturesCounted = 0, picturesPerSecond = 0, counts = {};
+let picturesCounted = 0, picturesSeen = 0, picturesPerSecond = 0, counts = {};
+let lastRunMs = null, lastProblem = '', readySince = null, lastCountAt = null, countingPaused = false;
 let generation = 0, revision = 0, stream = null, helperStop = null, source = 'device', cameraName = null;
 let helper = null, devices = [], selectedDevice = null, mirrored = false, editing = false;
 let geometry = initialGeometry('walkway'), inSide = 1, counter = null, tracker = new Tracker(), people = [];
-let runner = null, runnerModel = null, modelQueue = Promise.resolve(), frameTask = Promise.resolve();
-let pictureController = null;
+let runner = null, runnerModel = null, runnerChosen = false, modelQueue = Promise.resolve(), frameTask = Promise.resolve();
+let pictureController = null, runnerNotifications = null;
 let timer = null, videoCallback = null, rateTimer = null, noticeTimer = null;
-let lastVideoTime = -1, lastRun = -Infinity, lastTime = -Infinity, lastMediaTime = null;
-let pictureTimes = [], loadingModel = false, width = 0, height = 0, tableId = 4;
+let lastVideoTime = -1, lastRun = -Infinity, lastTime = -Infinity, lastPresentedFrames = 0;
+let countedTimes = [], loadingModel = false, width = 0, height = 0, tableId = 4;
 let freeSince = new Map(), tableRows = new Map(), lastRender = 0;
 const input = document.createElement('canvas'), inputContext = input.getContext('2d', { willReadFrequently: true });
 function freezeSnapshot(value) {
@@ -29,8 +31,9 @@ function freezeSnapshot(value) {
 Object.defineProperty(window, '__footfall', { value: Object.freeze({
   get screen() { return screen; }, get spot() { return spot; }, get backend() { return backend; },
   get model() { return model; }, get picturesCounted() { return picturesCounted; },
-  get picturesPerSecond() { return pictureRate(pictureTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
+  get picturesPerSecond() { return pictureRate(countedTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
   get cameraOn() { return cameraOn; },
+  get picturesSeen() { return picturesSeen; }, get lastRunMs() { return lastRunMs; }, get lastProblem() { return lastProblem; },
 }), writable: false, configurable: false });
 function say(message, duration = 0) {
   clearTimeout(noticeTimer); $('status').textContent = message;
@@ -53,8 +56,10 @@ function show(next) {
 function stopCamera(message = '') {
   generation++; pictureController?.abort(); pictureController = null; cancelPicture();
   clearInterval(rateTimer); editor.cancelPending();
-  cameraOn = false; loadingModel = false; picturesPerSecond = 0; pictureTimes = [];
-  lastVideoTime = -1; lastRun = lastTime = -Infinity; lastMediaTime = null;
+  cameraOn = false; loadingModel = false; picturesPerSecond = 0; countedTimes = [];
+  lastVideoTime = -1; lastRun = lastTime = -Infinity; lastPresentedFrames = 0;
+  readySince = lastCountAt = null; countingPaused = false;
+  if (message) lastProblem = message;
   const stop = helperStop; helperStop = null;
   if (stop) { try { Promise.resolve(stop()).catch(() => say('The Wi-Fi camera could not disconnect cleanly; close this tab to finish stopping it.')); } catch { say('The Wi-Fi camera could not disconnect cleanly; close this tab to finish stopping it.'); } }
   for (const track of stream?.getTracks() ?? []) track.stop();
@@ -114,12 +119,29 @@ function render() {
     $('queue-time').textContent = `${(counts.busySeconds/60).toFixed(1)} minutes with 3 or more waiting`;
   }
   if (spot === 'tables') renderTables();
-  if (cameraOn) { $('live').classList.add('live'); $('live').textContent = loadingModel ? 'Getting the counter ready' : `Counting ${picturesPerSecond.toFixed(1)} pictures a second`; }
+  if (cameraOn) {
+    const stalled = readySince !== null && performance.now()/1000 - (lastCountAt ?? readySince) >= 5;
+    $('live').classList.add('live');
+    $('live').textContent = loadingModel ? 'Getting the counter ready'
+      : countingPaused ? 'Camera is on; counting has paused.'
+      : stalled ? 'Camera is on, but no picture has been counted yet. Open More for details.'
+      : lastCountAt === null ? 'Waiting for the first camera picture.'
+      : `Counting ${picturesPerSecond.toFixed(1)} pictures a second`;
+  }
+  $('detail-backend').textContent = runner ? (runner.backend === 'webgpu' ? 'WebGPU' : 'WASM') : 'Getting ready';
+  $('detail-model').textContent = model ? `${{ nano: 'Fastest', tiny: 'Balanced', s: 'Most accurate' }[model]} (${modelSizes[model]})` : 'Choosing for this device';
+  $('detail-size').textContent = width && height ? `${width} × ${height}` : 'Waiting for the camera';
+  $('detail-seen').textContent = picturesSeen;
+  $('detail-counted').textContent = picturesCounted;
+  $('detail-rate').textContent = pictureRate(countedTimes,performance.now()/1000).toFixed(1);
+  $('detail-run').textContent = lastRunMs === null ? 'No count yet' : `${Math.round(lastRunMs)} ms`;
+  $('detail-problem').textContent = lastProblem;
+  $('detail-problem-row').hidden = !lastProblem;
   $('backend-label').textContent = runner && !loadingModel ? `Using ${backend === 'webgpu' ? 'WebGPU' : 'WASM'}.` : 'Counter is getting ready.';
 }
 function configureSpot(next) {
   spot = next; geometry = initialGeometry(spot); inSide = 1; tableId = 4; width = height = 0;
-  picturesCounted = 0; tableRows.clear(); $('table-list').replaceChildren();
+  picturesCounted = picturesSeen = 0; lastRunMs = null; tableRows.clear(); $('table-list').replaceChildren();
   $('spot-title').textContent = titles[spot];
   $('hint').textContent = spot === 'walkway' ? 'Drag the orange line to where people walk past.' : spot === 'tables' ? 'Drag a box onto each table.' : spot === 'doorway' ? 'Drag the line across the doorway.' : spot === 'shelf' ? 'Drag the box onto the shelf.' : 'Drag the box around people waiting to pay.';
   $('stop-control').hidden = !['walkway','shelf'].includes(spot); $('flip-inside').hidden = spot !== 'doorway';
@@ -167,34 +189,69 @@ function resizePicture() {
   resetCounts(rotated); editor.rebuild(); layoutPicture();
 }
 async function ensureModel(token) {
-  const requested = model;
-  loadingModel = true; render();
-  say(`Getting the counter ready, ${modelSizes[requested]}`);
+  const requested = model, chosen = modelChosen;
+  loadingModel = true; countingPaused = false; readySince = lastCountAt = null; render();
+  say(requested ? `Getting the counter ready, ${modelSizes[requested]}` : 'Getting the counter ready');
+  let modelNotice = '';
+  const onProblem = message => {
+    if (token !== generation) return;
+    modelNotice = message; lastProblem = message; say(message); render();
+  };
+  const notifications = { onProblem, onLoading: name => {
+    if (token !== generation) return;
+    model = name; $('model-choice').value = name;
+    if (loadingModel && !modelNotice) say(`Getting the counter ready, ${modelSizes[name]}`);
+    render();
+  } };
   const pending = modelQueue.catch(() => {}).then(async () => {
     await frameTask;
     if (token !== generation) return;
-    if (runnerModel !== requested || !runner) {
+    if (runnerModel !== requested || runnerChosen !== chosen || !runner) {
       const previous = runner; runner = null; runnerModel = null;
       await previous?.release();
-      runner = await createRunner(requested); runnerModel = requested;
+      runnerNotifications = notifications;
+      runner = await createRunner(requested, { modelChosen: chosen,
+        onProblem: message => notifications.onProblem(message),
+        onLoading: name => notifications.onLoading(name),
+      });
+      runnerModel = runner.model; runnerChosen = chosen;
+    } else {
+      // A reused session must report to the current camera generation after Stop or a switch.
+      Object.assign(runnerNotifications, notifications);
     }
     if (token !== generation) return;
-    backend = runner.backend; input.width = runner.inputW; input.height = runner.inputH;
-    loadingModel = false; say(''); render();
+    backend = runner.backend; model = runner.model; runnerModel = model; $('model-choice').value = model;
+    input.width = runner.inputW; input.height = runner.inputH;
+    loadingModel = false; readySince = performance.now()/1000;
+    if (!modelNotice) say('');
+    render();
     clearInterval(rateTimer);
-    rateTimer = setInterval(() => { picturesPerSecond = pictureRate(pictureTimes,performance.now()/1000); render(); },250);
+    rateTimer = setInterval(() => { picturesPerSecond = pictureRate(countedTimes,performance.now()/1000); render(); },250);
     schedule(token);
   });
   modelQueue = pending;
   try { await pending; } catch (error) {
-    if (token === generation) { loadingModel = false; clearInterval(rateTimer); say(error.code === 'MODEL_DOWNLOAD' ? 'The counter model could not download; check the model files and reload.' : 'The counter could not start in this browser; reload or try a current browser.'); $('live').textContent = 'Camera is on; counting has not started.'; }
+    if (token === generation) {
+      loadingModel = false; countingPaused = true; readySince = null; clearInterval(rateTimer);
+      lastProblem = error.code === 'MODEL_DOWNLOAD' ? 'The counter model could not download; check the model files and reload.' : 'The counter could not start in this browser; reload or try a current browser.';
+      say(lastProblem); render(); $('live').textContent = 'Camera is on; counting has not started.';
+    }
   }
 }
 function schedule(token) {
   if (token !== generation || !cameraOn) return;
   const run = metadata => {
-    frameTask = frame(token,metadata).catch(() => {
-      if (token === generation) { clearInterval(rateTimer); say('The counter could not read this picture; choose another counter in More or start again.'); $('live').textContent = 'Camera is on; counting has paused.'; $('restart-camera').hidden = false; }
+    const activeRunner = runner;
+    frameTask = frame(token,metadata).catch(error => {
+      // Restart may already be waiting for this failed run, even after its camera was stopped.
+      if (runner === activeRunner) runnerModel = null;
+      if (token !== generation) return;
+      countingPaused = true; readySince = null; runnerModel = null;
+      backend = runner.backend; model = runner.model; $('model-choice').value = model;
+      lastProblem = error.code === 'RUN_TIMEOUT' ? 'This device is taking more than 8 seconds a picture. Open More and choose Fastest.'
+        : error.code === 'MODEL_DOWNLOAD' ? 'The counter model could not download; check the model files and reload.'
+        : 'The counter could not read this picture; choose another counter in More or start again.';
+      say(lastProblem); render(); $('restart-camera').hidden = false;
     });
   };
   if (typeof video.requestVideoFrameCallback === 'function') {
@@ -203,33 +260,42 @@ function schedule(token) {
 }
 async function frame(token, metadata) {
   if (token !== generation || !cameraOn) return;
-  if (video.readyState < 2 || editing) { schedule(token); return; }
   const realTime = performance.now()/1000;
-  if (metadata) {
-    const stamp = metadata.mediaTime ?? metadata.expectedDisplayTime;
-    if (stamp === lastMediaTime) { schedule(token); return; }
-    lastMediaTime = stamp;
-  } else if (!fallbackNewPicture(video.currentTime,lastVideoTime,realTime,lastRun)) { schedule(token); return; }
-  lastVideoTime = video.currentTime; lastRun = realTime;
-  const t = metadata ? pictureTime(metadata,lastTime) : Math.max(realTime,lastTime+.000001);
+  if (!metadata && !fallbackNewPicture(video.currentTime,lastVideoTime,realTime,lastRun)) { schedule(token); return; }
+  // presentedFrames includes deliveries while inference was busy; older browsers only expose observed pictures.
+  const presented = metadata?.presentedFrames;
+  picturesSeen += Number.isFinite(presented) ? Math.max(1,presented-lastPresentedFrames) : 1;
+  if (Number.isFinite(presented)) lastPresentedFrames = presented;
+  lastVideoTime = video.currentTime;
+  if (video.readyState < 2 || editing) { schedule(token); return; }
+  lastRun = realTime;
+  const t = Math.max(realTime,lastTime+.000001);
   lastTime = t;
   resizePicture();
-  const frameRevision = revision, currentRunner = runner;
-  const { ratio,drawW,drawH } = letterbox(width,height,input.width,input.height);
-  inputContext.fillStyle = 'rgb(114,114,114)'; inputContext.fillRect(0,0,input.width,input.height);
-  inputContext.save();
-  if (mirrored) { inputContext.translate(drawW,0); inputContext.scale(-1,1); }
-  inputContext.drawImage(video,0,0,drawW,drawH); inputContext.restore();
-  const tensor = rgbaToTensor(inputContext.getImageData(0,0,input.width,input.height).data,input.width,input.height);
-  const raw = await currentRunner.run(tensor);
+  const frameRevision = revision, currentRunner = runner, started = performance.now();
+  let ratio;
+  // A fallback can change input size (Most accurate to Fastest), so capture again for that session.
+  const prepare = () => {
+    input.width = currentRunner.inputW; input.height = currentRunner.inputH;
+    const box = letterbox(width,height,input.width,input.height);
+    ratio = box.ratio;
+    inputContext.fillStyle = 'rgb(114,114,114)'; inputContext.fillRect(0,0,input.width,input.height);
+    inputContext.save();
+    if (mirrored) { inputContext.translate(box.drawW,0); inputContext.scale(-1,1); }
+    inputContext.drawImage(video,0,0,box.drawW,box.drawH); inputContext.restore();
+    return rgbaToTensor(inputContext.getImageData(0,0,input.width,input.height).data,input.width,input.height);
+  };
+  let raw;
+  try { raw = await currentRunner.run(prepare); }
+  finally { if (token === generation) lastRunMs = performance.now()-started; }
   if (token !== generation || !cameraOn) return;
-  backend = currentRunner.backend;
+  backend = currentRunner.backend; model = currentRunner.model; runnerModel = model; $('model-choice').value = model;
   if (frameRevision !== revision || video.videoWidth !== width || video.videoHeight !== height) { schedule(token); return; }
   people = tracker.update(decodeYolox(raw,{ inputW: input.width,inputH: input.height,ratio }),t);
   counter.update(people,t); counts = counter.snapshot(); picturesCounted++;
-  const finished = performance.now()/1000;
-  pictureTimes = pictureTimes.filter(time => time > finished-3); pictureTimes.push(finished);
-  picturesPerSecond = pictureRate(pictureTimes,finished);
+  const finished = performance.now()/1000; lastCountAt = finished;
+  countedTimes = countedTimes.filter(time => time > finished-3); countedTimes.push(finished);
+  picturesPerSecond = pictureRate(countedTimes,finished);
   draw(); if (finished-lastRender > .2) { render(); lastRender = finished; }
   schedule(token);
 }
@@ -328,19 +394,19 @@ $('switch-camera').addEventListener('click', () => {
   const current = devices.findIndex(d => d.deviceId === selectedDevice);
   selectedDevice = devices[(current+1)%devices.length]?.deviceId ?? null; void startCamera();
 });
-$('stop-seconds').value = stopSeconds; $('model-choice').value = model;
+$('stop-seconds').value = stopSeconds; $('model-choice').value = model ?? 'tiny';
 $('stop-seconds').addEventListener('change', () => { stopSeconds = Number($('stop-seconds').value); resetCounts(); if (cameraOn) say('The seconds setting changed, so the counts have started again.',4000); });
 $('flip-inside').addEventListener('click', () => { inSide *= -1; resetCounts(true); });
 $('add-table').addEventListener('click', () => { const table = { id: ++tableId,section: 'Room',...nextTableBox(geometry.tables) }; geometry.tables.push(table); editor.rebuild(); editor.select(table); resetCounts(true); });
 $('more').addEventListener('click', () => {
   if (typeof $('more-sheet').showModal !== 'function') { say('This browser cannot open the controls; use a current browser and try again.'); return; }
-  $('more-sheet').showModal();
+  render(); $('more-sheet').showModal();
 });
 $('close-more').addEventListener('click', () => $('more-sheet').close());
 $('model-choice').addEventListener('change', () => {
-  model = $('model-choice').value;
+  modelChosen = true; model = $('model-choice').value;
   if (cameraOn) {
-    const token = ++generation; cancelPicture(); pictureTimes = []; picturesPerSecond = 0;
+    const token = ++generation; cancelPicture(); countedTimes = []; picturesPerSecond = 0;
     void ensureModel(token);
   }
 });

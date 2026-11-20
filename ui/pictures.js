@@ -5,10 +5,6 @@ export function pictureRate(times, now) {
 export function fallbackNewPicture(currentTime, previousTime, now, previousRun) {
   return currentTime !== previousTime && now - previousRun >= 1 / 60;
 }
-export function pictureTime(metadata, previous) {
-  const time = Number.isFinite(metadata.mediaTime) ? metadata.mediaTime : metadata.expectedDisplayTime / 1000;
-  return Math.max(time, previous + .000001);
-}
 export function containedPicture(boxW, boxH, frameW, frameH) {
   const scale = Math.min(boxW / frameW, boxH / frameH);
   const width = frameW * scale, height = frameH * scale;

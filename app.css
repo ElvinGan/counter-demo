@@ -122,3 +122,9 @@ dialog::backdrop{background:#2f292288}
 
 .box-select{position:absolute;border:0;background:transparent;touch-action:none;padding:0}
 .handle{z-index:1}
+
+.details{margin:0;font-size:14px;overflow-wrap:anywhere}
+.details>div{padding:8px 0;border-bottom:1px solid var(--line)}
+.details dt{font-weight:600}
+.details dd{margin:2px 0 0;color:var(--ink2);font-variant-numeric:tabular-nums}
+dialog{max-height:calc(100% - 24px);overflow-y:auto}
