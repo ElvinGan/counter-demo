@@ -6,6 +6,8 @@ import { geometryEditor, drawOverlay } from './ui/geometry.js';
 import { pictureRate, fallbackNewPicture, containedPicture } from './ui/pictures.js';
 import { clips } from './videos/clips.js';
 import { clipGeometry, repeatTimeline } from './ui/video.js';
+import { deviceStore, sessionKeeper } from './ui/store.js';
+import { historyScreen } from './ui/history.js';
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay');
 const titles = { walkway: 'Walkway', doorway: 'Doorway', counter: 'Counter', shelf: 'Shelf', tables: 'Tables' };
@@ -32,6 +34,14 @@ let lastVideoTime = -1, lastRun = -Infinity, lastTime = -Infinity, lastPresented
 let countedTimes = [], loadingModel = false, width = 0, height = 0, tableId = 4;
 let freeSince = new Map(), tableRows = new Map(), lastRender = 0;
 const input = document.createElement('canvas'), inputContext = input.getContext('2d', { willReadFrequently: true });
+const kept = sessionKeeper({ store: deviceStore(), onProblem: message => { lastProblem = message; render(); },
+  every: setInterval, cancel: clearInterval });
+const history = historyScreen({ keeper: kept, root: document, later: setTimeout, cancel: clearTimeout, back: () => { show('start'); say(''); }, onProblem: say });
+function keepCount(before) {
+  const label = source === 'device' ? stream?.getVideoTracks()[0]?.label ?? ''
+    : source === 'wifi' ? cameraName ?? '' : source === 'file' ? ownFile?.name ?? '' : '';
+  kept.counted({ spot,source,label,geometry,inSide,stopSeconds,model },counts,before);
+}
 function freezeSnapshot(value) {
   if (Array.isArray(value)) return Object.freeze(value.map(freezeSnapshot));
   return value && typeof value === 'object' ? Object.freeze(Object.fromEntries(Object.entries(value).map(([k,v]) => [k,freezeSnapshot(v)]))) : value;
@@ -43,6 +53,7 @@ Object.defineProperty(window, '__footfall', { value: Object.freeze({
   get cameraOn() { return cameraOn && !isVideo(); },
   get source() { return source; }, get videoRepeats() { return isVideo() ? videoRepeats : 0; },
   get steppedDown() { return steppedDown; },
+  get sessionId() { return kept.sessionId; }, get eventsKept() { return kept.eventsKept; },
   get picturesSeen() { return picturesSeen; }, get lastRunMs() { return lastRunMs; }, get lastProblem() { return lastProblem; },
 }), writable: false, configurable: false });
 function say(message, duration = 0) {
@@ -60,10 +71,12 @@ function cancelPicture() {
 function show(next) {
   screen = next;
   $('start-screen').hidden = next !== 'start'; $('counting-screen').hidden = next !== 'counting'; $('source-screen').hidden = next !== 'source';
-  const heading = next === 'start' ? $('start-title') : next === 'counting' ? $('spot-title') : $('source-title');
+  $('history-screen').hidden = next !== 'history';
+  const heading = next === 'start' ? $('start-title') : next === 'counting' ? $('spot-title') : next === 'history' ? $('history-title') : $('source-title');
   heading.tabIndex = -1; heading.focus();
 }
-function stopCamera(message = '') {
+function stopCamera(message = '', reason = 'left') {
+  kept.end(message ? 'problem' : reason);
   generation++; pictureController?.abort(); pictureController = null; cancelPicture();
   clearInterval(rateTimer); editor.cancelPending();
   cameraOn = false; loadingModel = false; picturesPerSecond = 0; countedTimes = [];
@@ -83,6 +96,7 @@ function stopCamera(message = '') {
   return generation;
 }
 function resetCounts(announce = false) {
+  if (cameraOn) kept.end('changed');
   revision++; tracker = new Tracker(); people = [];
   counter = makeCounters(spot, pixelGeometry(geometry,width || 1280,height || 720),stopSeconds,inSide);
   counts = counter.snapshot(); freeSince = new Map();
@@ -291,7 +305,7 @@ async function frame(token, metadata) {
   const t = Math.max(realTime + engineOffset,lastTime+.000001);
   lastTime = t;
   resizePicture();
-  const frameRevision = revision, currentRunner = runner;
+  const frameRevision = revision, frameModel = model, currentRunner = runner;
   let ratio;
   // A fallback can change input size (Most accurate to Fastest), so capture again for that session.
   const prepare = () => {
@@ -308,10 +322,14 @@ async function frame(token, metadata) {
   try { raw = await currentRunner.run(prepare); }
   finally { if (token === generation) lastRunMs = currentRunner.lastRunMs; }
   if (token !== generation || !cameraOn) return;
+  const modelChanged = frameModel !== currentRunner.model;
   backend = currentRunner.backend; model = currentRunner.model; runnerModel = model; $('model-choice').value = model;
   if (frameRevision !== revision || video.videoWidth !== width || video.videoHeight !== height) { schedule(token); return; }
+  if (modelChanged) resetCounts();
+  const beforeCounts = counts;
   people = tracker.update(decodeYolox(raw,{ inputW: input.width,inputH: input.height,ratio }),t);
-  counter.update(people,t); counts = counter.snapshot(); picturesCounted++;
+  counter.update(people,t); counts = counter.snapshot();
+  keepCount(beforeCounts); picturesCounted++;
   const finished = performance.now()/1000; lastCountAt = finished;
   countedTimes = countedTimes.filter(time => time > finished-3); countedTimes.push(finished);
   picturesPerSecond = pictureRate(countedTimes,finished);
@@ -391,8 +409,8 @@ function updateStartSource() {
   $('use-camera').setAttribute('aria-pressed', String(startSource === 'device'));
   $('use-test').setAttribute('aria-pressed', String(startSource === 'test'));
   $('source-promise').textContent = startSource === 'test'
-    ? 'Plays a test video in this page. Nothing is recorded and nothing leaves this device.'
-    : "Uses this device's camera. Nothing is recorded and nothing leaves this device.";
+    ? 'Plays a test video in this page. No pictures are kept and nothing leaves this device. Counts are kept on this device.'
+    : "Uses this device's camera. No pictures are kept and nothing leaves this device. Counts are kept on this device.";
   for (const button of document.querySelectorAll('[data-spot]')) {
     const small = button.querySelector('small');
     button.dataset.description ??= small.textContent;
@@ -485,6 +503,7 @@ $('choose-source').addEventListener('click', async () => {
   await helperReady;
   if (helper && screen === 'source') { try { await refreshCameras(); } catch { say('The camera list could not load; check the Mac helper and try again.'); } }
 });
+$('open-history').addEventListener('click', () => { show('history'); say(''); void history.open(); });
 $('source-back').addEventListener('click', () => { stopCamera(); show('start'); say(''); });
 $('device-source').addEventListener('click', () => { stopCamera(); ownFile = null; source = 'device'; startSource = 'device'; updateStartSource(); cameraName = null; show('start'); say(''); });
 $('camera-form').addEventListener('submit', async event => {
@@ -504,7 +523,7 @@ $('camera-form').addEventListener('submit', async event => {
   finally { $('connect-camera').disabled = false; }
 });
 $('change-spot').addEventListener('click', () => { stopCamera(); ownFile = null; show('start'); say(''); });
-$('stop-camera').addEventListener('click', () => { stopCamera(); $('restart-camera').focus(); });
+$('stop-camera').addEventListener('click', () => { stopCamera('', 'stopped'); $('restart-camera').focus(); });
 $('restart-camera').addEventListener('click', () => { void startCamera(); });
 $('switch-camera').addEventListener('click', () => {
   const current = devices.findIndex(d => d.deviceId === selectedDevice);

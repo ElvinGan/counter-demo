@@ -31,8 +31,9 @@
 <li><button class="spot" data-spot="counter" type="button"><svg viewBox="0 0 64 46"><rect x="5" y="9" width="14" height="30" rx="3" fill="#e8e4de"/><rect x="24" y="12" width="35" height="27" rx="4" fill="#fff1e6" stroke="#ff630f" stroke-width="2.5"/><use href="#p" x="28" y="15" width="9" height="21" fill="#2f2922"/><use href="#p" x="37" y="15" width="9" height="21" fill="#2f2922"/><use href="#p" x="46" y="15" width="9" height="21" fill="#2f2922"/></svg><div><b>Counter</b><small>People waiting to pay</small></div><i aria-hidden="true">›</i></button></li>
 <li><button class="spot" data-spot="shelf" type="button"><svg viewBox="0 0 64 46"><rect x="6" y="5" width="52" height="11" rx="3" fill="#e8e4de"/><rect x="20" y="19" width="24" height="24" rx="4" fill="#fff1e6" stroke="#ff630f" stroke-width="2.5"/><use href="#p" x="27" y="20" width="10" height="22" fill="#2f2922"/></svg><div><b>Shelf</b><small>People stopping at a shelf</small></div><i aria-hidden="true">›</i></button></li>
 <li hidden><button class="spot" data-spot="tables" type="button"><svg viewBox="0 0 64 46"><rect x="6" y="8" width="22" height="13" rx="3" fill="#2f2922"/><rect x="36" y="8" width="22" height="13" rx="3" fill="none" stroke="#2f2922" stroke-width="2" stroke-dasharray="4 3"/><rect x="6" y="26" width="22" height="13" rx="3" fill="none" stroke="#2f2922" stroke-width="2" stroke-dasharray="4 3"/><rect x="36" y="26" width="22" height="13" rx="3" fill="#2f2922"/></svg><div><b>Tables</b><small>Tables taken and free</small></div><i aria-hidden="true">›</i></button></li></ul>
-<p class="promise"><svg aria-hidden="true"><use href="#lock"/></svg><span id="source-promise">Uses this device's camera. Nothing is recorded and nothing leaves this device.</span></p>
+<p class="promise"><svg aria-hidden="true"><use href="#lock"/></svg><span id="source-promise">Uses this device's camera. No pictures are kept and nothing leaves this device. Counts are kept on this device.</span></p>
 <button id="choose-source" class="other">Use a camera on the Wi-Fi instead</button>
+<button id="open-history" class="other">History</button>
 </div></section>
 <section id="counting-screen" class="counting" hidden aria-label="Camera and counts">
 <div class="bar"><strong id="spot-title">Walkway</strong><button id="change-spot" class="chip">Change spot</button></div>
@@ -77,6 +78,21 @@
 <button id="connect-camera" class="btn" type="submit">Connect this camera</button>
 </fieldset></form><ul id="saved-cameras"></ul>
 <p class="promise"><svg aria-hidden="true"><use href="#lock"/></svg><span>The camera's password stays on this Mac.</span></p>
+</div></section>
+<section id="history-screen" class="phone" hidden aria-labelledby="history-title">
+<div class="bar"><strong id="history-title">History</strong><button id="history-back" class="chip">Back</button></div>
+<div class="pad">
+<p id="history-empty">No counts kept on this device yet. Start a camera and they will show here.</p>
+<label id="history-what-label" for="history-what" hidden>Show counts for</label>
+<select id="history-what" hidden></select>
+<div id="history-ranges" class="source-pills" role="group" aria-label="History range" hidden>
+<button id="range-today" class="chip" aria-pressed="true">Today</button>
+<button id="range-week" class="chip" aria-pressed="false">7 days</button>
+</div>
+<div id="history-summary" hidden><b id="history-main">0</b><span id="history-main-label">walked past</span><p id="history-covered">Counted 0 min in this range</p></div>
+<ol id="history-bars" hidden></ol>
+<ul id="history-sessions" hidden></ul>
+<button id="clear-history" class="btn quiet" hidden>Clear the history on this device</button>
 </div></section>
 <noscript><p class="status">This browser has JavaScript turned off; turn it on and reload to count people.</p></noscript>
 </main>
