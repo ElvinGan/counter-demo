@@ -38,3 +38,11 @@ export function nextTableBox(tables) {
   const x1 = Math.min(.7,last.x1+.03), y1 = Math.min(.7,last.y1+.03);
   return { x1,y1,x2:x1+.3,y2:y1+.3 };
 }
+
+// Names the walkway rule's two directions the way a person sees them in the picture.
+// rules.js counts aToB when a person ends on the positive side: right of a top-to-bottom line, above a left-to-right one.
+export function walkwayWords(line) {
+  const dx = line.bx - line.ax, dy = line.by - line.ay;
+  if (Math.abs(dy) >= Math.abs(dx)) return dy > 0 ? ['left to right', 'right to left'] : ['right to left', 'left to right'];
+  return dx > 0 ? ['moving up the picture', 'moving down the picture'] : ['moving down the picture', 'moving up the picture'];
+}

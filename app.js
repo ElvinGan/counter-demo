@@ -1,7 +1,7 @@
 import { letterbox, rgbaToTensor, decodeYolox } from './engine/detect.js';
 import { Tracker } from './engine/tracker.js';
 import { createRunner, modelSizes, modelNames, stepDownTarget } from './ui/model.js';
-import { initialGeometry, pixelGeometry, makeCounters, nextTableBox } from './ui/counts.js';
+import { initialGeometry, pixelGeometry, makeCounters, nextTableBox, walkwayWords } from './ui/counts.js';
 import { geometryEditor, drawOverlay } from './ui/geometry.js';
 import { pictureRate, fallbackNewPicture, containedPicture } from './ui/pictures.js';
 import { clips } from './videos/clips.js';
@@ -123,7 +123,8 @@ function renderTables() {
   metric(counts.occupied,`of ${counts.total} tables taken`,counts.fullHouse ? 'full house' : 'not a full house',counts.total-counts.occupied,'tables free',`longest free ${Math.floor(longest)} min`);
 }
 function render() {
-  if (spot === 'walkway') metric(counts.total,'walked past',`${counts.aToB} one way, ${counts.bToA} the other`,counts.stopped.stops,'stopped at the counter',`${stopSeconds} seconds or more`);
+  const ways = spot === 'walkway' ? walkwayWords(geometry.line) : null;
+  if (spot === 'walkway') metric(counts.total,'walked past',`${counts.aToB} ${ways[0]}, ${counts.bToA} ${ways[1]}`,counts.stopped.stops,'stopped at the counter',`${stopSeconds} seconds or more`);
   if (spot === 'doorway') metric(counts.in,'walked in','',counts.out,'walked out','');
   if (spot === 'shelf') metric(counts.now,'at the shelf now','',counts.stops,`stopped ${stopSeconds} seconds or more`,'');
   if (spot === 'counter') {
