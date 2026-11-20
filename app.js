@@ -1,6 +1,6 @@
 import { letterbox, rgbaToTensor, decodeYolox } from './engine/detect.js';
 import { Tracker } from './engine/tracker.js';
-import { createRunner, modelSizes } from './ui/model.js';
+import { createRunner, modelSizes, modelNames, stepDownTarget } from './ui/model.js';
 import { initialGeometry, pixelGeometry, makeCounters, nextTableBox } from './ui/counts.js';
 import { geometryEditor, drawOverlay } from './ui/geometry.js';
 import { pictureRate, fallbackNewPicture, containedPicture } from './ui/pictures.js';
@@ -25,6 +25,7 @@ let helper = null, devices = [], selectedDevice = null, mirrored = false, editin
 let geometry = initialGeometry('walkway'), inSide = 1, counter = null, tracker = new Tracker(), people = [];
 let runner = null, runnerModel = null, runnerChosen = false, modelQueue = Promise.resolve(), frameTask = Promise.resolve();
 let pictureController = null, runnerNotifications = null;
+let runTimesMs = [], timedModel = null, steppedDown = 0;
 let repeatTask = Promise.resolve();
 let timer = null, videoCallback = null, rateTimer = null, noticeTimer = null;
 let lastVideoTime = -1, lastRun = -Infinity, lastTime = -Infinity, lastPresentedFrames = 0;
@@ -41,6 +42,7 @@ Object.defineProperty(window, '__footfall', { value: Object.freeze({
   get picturesPerSecond() { return pictureRate(countedTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
   get cameraOn() { return cameraOn && !isVideo(); },
   get source() { return source; }, get videoRepeats() { return isVideo() ? videoRepeats : 0; },
+  get steppedDown() { return steppedDown; },
   get picturesSeen() { return picturesSeen; }, get lastRunMs() { return lastRunMs; }, get lastProblem() { return lastProblem; },
 }), writable: false, configurable: false });
 function say(message, duration = 0) {
@@ -139,7 +141,7 @@ function render() {
       : `Counting ${picturesPerSecond.toFixed(1)} pictures a second`;
   }
   $('detail-backend').textContent = runner ? (runner.backend === 'webgpu' ? 'WebGPU' : 'WASM') : 'Getting ready';
-  $('detail-model').textContent = model ? `${{ nano: 'Fastest', tiny: 'Balanced', s: 'Most accurate' }[model]} (${modelSizes[model]})` : 'Choosing for this device';
+  $('detail-model').textContent = model ? `${modelNames[model]} (${modelSizes[model]})` : 'Choosing for this device';
   $('detail-size').textContent = width && height ? `${width} × ${height}` : isVideo() ? 'Waiting for the video' : 'Waiting for the camera';
   $('detail-seen').textContent = picturesSeen;
   $('detail-counted').textContent = picturesCounted;
@@ -223,6 +225,7 @@ async function ensureModel(token) {
     if (token !== generation) return;
     if (runnerModel !== requested || runnerChosen !== chosen || !runner) {
       const previous = runner; runner = null; runnerModel = null;
+      runTimesMs = []; timedModel = null;
       await previous?.release();
       runnerNotifications = notifications;
       runner = await createRunner(requested, { modelChosen: chosen,
@@ -287,7 +290,7 @@ async function frame(token, metadata) {
   const t = Math.max(realTime + engineOffset,lastTime+.000001);
   lastTime = t;
   resizePicture();
-  const frameRevision = revision, currentRunner = runner, started = performance.now();
+  const frameRevision = revision, currentRunner = runner;
   let ratio;
   // A fallback can change input size (Most accurate to Fastest), so capture again for that session.
   const prepare = () => {
@@ -302,7 +305,7 @@ async function frame(token, metadata) {
   };
   let raw;
   try { raw = await currentRunner.run(prepare); }
-  finally { if (token === generation) lastRunMs = performance.now()-started; }
+  finally { if (token === generation) lastRunMs = currentRunner.lastRunMs; }
   if (token !== generation || !cameraOn) return;
   backend = currentRunner.backend; model = currentRunner.model; runnerModel = model; $('model-choice').value = model;
   if (frameRevision !== revision || video.videoWidth !== width || video.videoHeight !== height) { schedule(token); return; }
@@ -312,7 +315,30 @@ async function frame(token, metadata) {
   countedTimes = countedTimes.filter(time => time > finished-3); countedTimes.push(finished);
   picturesPerSecond = pictureRate(countedTimes,finished);
   draw(); if (finished-lastRender > .2) { render(); lastRender = finished; }
+  if (timedModel !== model) { runTimesMs = []; timedModel = model; }
+  runTimesMs.push(lastRunMs);
+  // Bound memory for long sessions without discarding the warm-up slots.
+  if (runTimesMs.length > 13) runTimesMs.splice(3,runTimesMs.length-13);
+  const target = stepDownTarget(runTimesMs,{ model, chosen: modelChosen });
+  if (target) { void changeModel(target,true); return; }
   schedule(token);
+}
+async function changeModel(selected, automatic = false) {
+  const tokenBefore = generation, previous = model;
+  if (!automatic) modelChosen = true;
+  // A repeat must retire its people before a switch resets the counters and generation.
+  if (repeating) await repeatTask;
+  if (tokenBefore !== generation || (automatic && modelChosen)) return;
+  model = selected;
+  if (cameraOn) {
+    const token = ++generation; cancelPicture(); countedTimes = []; picturesPerSecond = 0;
+    resetCounts();
+    await ensureModel(token);
+    if (automatic && token === generation && !countingPaused && model === selected) {
+      steppedDown++;
+      say(`This device counts slowly on ${modelNames[previous]} (${modelSizes[previous]}), so the counter switched to ${modelNames[selected]} (${modelSizes[selected]}). You can change it in More.`,8000);
+    }
+  }
 }
 async function startCamera() {
   const token = stopCamera(); show('counting'); say(isVideo() ? 'Opening the video.' : 'Opening the camera.');
@@ -483,7 +509,7 @@ $('switch-camera').addEventListener('click', () => {
   const current = devices.findIndex(d => d.deviceId === selectedDevice);
   selectedDevice = devices[(current+1)%devices.length]?.deviceId ?? null; void startCamera();
 });
-$('stop-seconds').value = stopSeconds; $('model-choice').value = model ?? 'tiny';
+$('stop-seconds').value = stopSeconds; $('model-choice').value = model ?? 's';
 $('stop-seconds').addEventListener('change', () => { stopSeconds = Number($('stop-seconds').value); resetCounts(); if (cameraOn) say('The seconds setting changed, so the counts have started again.',4000); });
 $('flip-inside').addEventListener('click', () => { inSide *= -1; resetCounts(true); });
 $('add-table').addEventListener('click', () => { const table = { id: ++tableId,section: 'Room',...nextTableBox(geometry.tables) }; geometry.tables.push(table); editor.rebuild(); editor.select(table); resetCounts(true); });
@@ -492,16 +518,8 @@ $('more').addEventListener('click', () => {
   render(); $('more-sheet').showModal();
 });
 $('close-more').addEventListener('click', () => $('more-sheet').close());
-$('model-choice').addEventListener('change', async () => {
-  const selected = $('model-choice').value, tokenBefore = generation;
-  // Let the boundary finish retiring people before a model change replaces its generation.
-  if (repeating) await repeatTask;
-  if (tokenBefore !== generation) return;
-  modelChosen = true; model = selected;
-  if (cameraOn) {
-    const token = ++generation; cancelPicture(); countedTimes = []; picturesPerSecond = 0;
-    void ensureModel(token);
-  }
+$('model-choice').addEventListener('change', () => {
+  void changeModel($('model-choice').value);
 });
 $('use-camera').addEventListener('click', () => { startSource = 'device'; source = 'device'; updateStartSource(); });
 $('use-test').addEventListener('click', () => { startSource = 'test'; updateStartSource(); });

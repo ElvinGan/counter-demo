@@ -16,6 +16,16 @@ async function loadModel(model) {
   return bytes.get(model);
 }
 export const modelSizes = { nano: '4 MB', tiny: '20 MB', s: '36 MB' };
+export const modelNames = { nano: 'Fastest', tiny: 'Balanced', s: 'Most accurate' };
+export function nextFasterModel(model) {
+  return model === 's' ? 'tiny' : model === 'tiny' ? 'nano' : null;
+}
+export function stepDownTarget(runTimesMs, { model, chosen }) {
+  if (chosen || runTimesMs.length < 13) return null;
+  // Startup work must not make a capable device settle for a smaller model.
+  const recent = runTimesMs.slice(3).slice(-10).sort((a,b) => a-b);
+  return (recent[4]+recent[5])/2 > 125 ? nextFasterModel(model) : null;
+}
 export async function createRunner(model, options = {}) {
   const modelChosen = options.modelChosen ?? Boolean(model);
   const loadGPU = options.loadGPU ?? (() => import('../vendor/ort/ort.webgpu.min.mjs'));
@@ -24,10 +34,12 @@ export async function createRunner(model, options = {}) {
   const isolated = options.isolated ?? globalThis.crossOriginIsolated;
   const startTimer = options.setTimeout ?? globalThis.setTimeout;
   const cancelTimer = options.clearTimeout ?? globalThis.clearTimeout;
+  const now = options.now ?? (() => performance.now());
+  let lastRunMs = null;
   let runtime, session, backend, inputW, inputH, lastProblem = '', unusable = false;
   function problem(message) { lastProblem = message; options.onProblem?.(message); }
   async function open(provider) {
-    model ??= provider === 'webgpu' ? 'tiny' : 'nano';
+    model ??= provider === 'webgpu' ? 's' : 'nano';
     options.onLoading?.(model);
     let data;
     try { data = await (options.loadModel ?? loadModel)(model); }
@@ -75,7 +87,12 @@ export async function createRunner(model, options = {}) {
     const input = new runtime.Tensor('float32', typeof pixels === 'function' ? pixels() : pixels, [1, 3, inputH, inputW]);
     let output;
     try {
-      output = await active.run({ [active.inputNames[0]]: input });
+      const started = now();
+      try { output = await active.run({ [active.inputNames[0]]: input }); }
+      finally {
+        // A retired GPU result must not replace the current WASM run's measurement.
+        if (active === session) lastRunMs = now()-started;
+      }
       return new Float32Array(output[active.outputNames[0]].data);
     } finally {
       input.dispose?.();
@@ -102,6 +119,7 @@ export async function createRunner(model, options = {}) {
   }
   return {
     get model() { return model; }, get lastProblem() { return lastProblem; },
+    get lastRunMs() { return lastRunMs; },
     get backend() { return backend; }, get inputW() { return inputW; }, get inputH() { return inputH; },
     async run(pixels) {
       if (unusable || !session) throw new Error('The counter needs to be restarted.');
