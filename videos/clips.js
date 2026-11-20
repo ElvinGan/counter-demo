@@ -1,10 +1,10 @@
 // Keep clip choices together so deployments can supply footage without changing the player.
 // Sources and licences: SOURCES.md beside this file. Geometry was placed by eye on each clip.
 export const clips = {
-  walkway: { file: './videos/walkway.mp4', credit: '"People walking in front of a building", Mixkit.',
-    geometry: { line: { ax: .5, ay: .05, bx: .5, by: .97 }, zone: { x1: .33, y1: .56, x2: .47, y2: .86 } }, inSide: 1, stopSeconds: 5 },
-  doorway: { file: './videos/doorway.mp4', credit: '"HD CCTV Camera video 3MP 4MP iProx CCTV HDCCTVCameras.net retail store", HDCCTV Cameras, on YouTube. The door is below the picture; people come in over the mat.',
-    geometry: { line: { ax: .40, ay: .68, bx: .99, by: .56 } }, inSide: 1, stopSeconds: 5 },
+  walkway: { file: './videos/walkway.mp4', credit: '"The CCTV People Demo 2", CCTV People, on YouTube.',
+    geometry: { line: { ax: .05, ay: .62, bx: .80, by: .62 }, zone: { x1: .68, y1: .4, x2: .9, y2: .98 } }, inSide: 1, stopSeconds: 5 },
+  doorway: { file: './videos/doorway.mp4', credit: '"The CCTV People Demo 2", CCTV People, on YouTube. The shop door is at the right edge.',
+    geometry: { line: { ax: .88, ay: .40, bx: .88, by: 1 } }, inSide: 1, stopSeconds: 5 },
   counter: { file: './videos/counter.mp4', credit: '"IGA Supermarket: 2mp IP camera (check-out overview)", Liveforce Security Systems, on YouTube.',
     geometry: { zone: { x1: .56, y1: .1, x2: .81, y2: .75 } }, inSide: 1, stopSeconds: 5 },
   shelf:   { file: './videos/shelf.mp4',   credit: '"HD CCTV Camera video 3MP 4MP iProx CCTV HDCCTVCameras.net retail store", HDCCTV Cameras, on YouTube.',
