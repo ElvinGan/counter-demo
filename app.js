@@ -4,6 +4,8 @@ import { createRunner, modelSizes } from './ui/model.js';
 import { initialGeometry, pixelGeometry, makeCounters, nextTableBox } from './ui/counts.js';
 import { geometryEditor, drawOverlay } from './ui/geometry.js';
 import { pictureRate, fallbackNewPicture, containedPicture } from './ui/pictures.js';
+import { clips } from './videos/clips.js';
+import { clipGeometry, repeatTimeline } from './ui/video.js';
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay');
 const titles = { walkway: 'Walkway', doorway: 'Doorway', counter: 'Counter', shelf: 'Shelf', tables: 'Tables' };
@@ -11,6 +13,10 @@ const params = new URLSearchParams(location.search);
 let modelChosen = Object.hasOwn(modelSizes, params.get('model'));
 let model = modelChosen ? params.get('model') : undefined;
 let stopSeconds = [5,10,30,60].includes(Number(params.get('stop'))) ? Number(params.get('stop')) : 10;
+const defaultStopSeconds = stopSeconds;
+let startSource = params.get('source') === 'test' ? 'test' : 'device';
+let ownFile = null, ownURL = null, videoRepeats = 0, engineOffset = 0, repeating = false;
+const isVideo = () => source === 'test' || source === 'file';
 let screen = 'start', spot = null, cameraOn = false, backend = 'wasm';
 let picturesCounted = 0, picturesSeen = 0, picturesPerSecond = 0, counts = {};
 let lastRunMs = null, lastProblem = '', readySince = null, lastCountAt = null, countingPaused = false;
@@ -19,6 +25,7 @@ let helper = null, devices = [], selectedDevice = null, mirrored = false, editin
 let geometry = initialGeometry('walkway'), inSide = 1, counter = null, tracker = new Tracker(), people = [];
 let runner = null, runnerModel = null, runnerChosen = false, modelQueue = Promise.resolve(), frameTask = Promise.resolve();
 let pictureController = null, runnerNotifications = null;
+let repeatTask = Promise.resolve();
 let timer = null, videoCallback = null, rateTimer = null, noticeTimer = null;
 let lastVideoTime = -1, lastRun = -Infinity, lastTime = -Infinity, lastPresentedFrames = 0;
 let countedTimes = [], loadingModel = false, width = 0, height = 0, tableId = 4;
@@ -32,7 +39,8 @@ Object.defineProperty(window, '__footfall', { value: Object.freeze({
   get screen() { return screen; }, get spot() { return spot; }, get backend() { return backend; },
   get model() { return model; }, get picturesCounted() { return picturesCounted; },
   get picturesPerSecond() { return pictureRate(countedTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
-  get cameraOn() { return cameraOn; },
+  get cameraOn() { return cameraOn && !isVideo(); },
+  get source() { return source; }, get videoRepeats() { return isVideo() ? videoRepeats : 0; },
   get picturesSeen() { return picturesSeen; }, get lastRunMs() { return lastRunMs; }, get lastProblem() { return lastProblem; },
 }), writable: false, configurable: false });
 function say(message, duration = 0) {
@@ -64,9 +72,11 @@ function stopCamera(message = '') {
   if (stop) { try { Promise.resolve(stop()).catch(() => say('The Wi-Fi camera could not disconnect cleanly; close this tab to finish stopping it.')); } catch { say('The Wi-Fi camera could not disconnect cleanly; close this tab to finish stopping it.'); } }
   for (const track of stream?.getTracks() ?? []) track.stop();
   for (const track of video.srcObject?.getTracks?.() ?? []) track.stop();
+  if (ownURL) { URL.revokeObjectURL(ownURL); ownURL = null; }
+  repeating = false;
   stream = null; video.pause(); video.srcObject = null; video.removeAttribute('src'); video.load();
   $('stop-camera').hidden = true; $('restart-camera').hidden = false; $('switch-camera').hidden = true;
-  $('live').textContent = message ? '' : 'Camera is off.'; $('live').classList.remove('live');
+  $('live').textContent = message ? '' : isVideo() ? 'Video is stopped.' : 'Camera is off.'; $('live').classList.remove('live');
   say(message);
   return generation;
 }
@@ -123,14 +133,14 @@ function render() {
     const stalled = readySince !== null && performance.now()/1000 - (lastCountAt ?? readySince) >= 5;
     $('live').classList.add('live');
     $('live').textContent = loadingModel ? 'Getting the counter ready'
-      : countingPaused ? 'Camera is on; counting has paused.'
-      : stalled ? 'Camera is on, but no picture has been counted yet. Open More for details.'
-      : lastCountAt === null ? 'Waiting for the first camera picture.'
+      : countingPaused ? (isVideo() ? 'Video is playing; counting has paused.' : 'Camera is on; counting has paused.')
+      : stalled ? (isVideo() ? 'Video is playing, but no picture has been counted yet. Open More for details.' : 'Camera is on, but no picture has been counted yet. Open More for details.')
+      : lastCountAt === null ? (isVideo() ? 'Waiting for the first picture of the video.' : 'Waiting for the first camera picture.')
       : `Counting ${picturesPerSecond.toFixed(1)} pictures a second`;
   }
   $('detail-backend').textContent = runner ? (runner.backend === 'webgpu' ? 'WebGPU' : 'WASM') : 'Getting ready';
   $('detail-model').textContent = model ? `${{ nano: 'Fastest', tiny: 'Balanced', s: 'Most accurate' }[model]} (${modelSizes[model]})` : 'Choosing for this device';
-  $('detail-size').textContent = width && height ? `${width} × ${height}` : 'Waiting for the camera';
+  $('detail-size').textContent = width && height ? `${width} × ${height}` : isVideo() ? 'Waiting for the video' : 'Waiting for the camera';
   $('detail-seen').textContent = picturesSeen;
   $('detail-counted').textContent = picturesCounted;
   $('detail-rate').textContent = pictureRate(countedTimes,performance.now()/1000).toFixed(1);
@@ -140,7 +150,12 @@ function render() {
   $('backend-label').textContent = runner && !loadingModel ? `Using ${backend === 'webgpu' ? 'WebGPU' : 'WASM'}.` : 'Counter is getting ready.';
 }
 function configureSpot(next) {
-  spot = next; geometry = initialGeometry(spot); inSide = 1; tableId = 4; width = height = 0;
+  spot = next;
+  const clip = source === 'test' ? clips[spot] : null;
+  geometry = clipGeometry(spot, clip?.geometry); inSide = clip?.inSide ?? 1;
+  stopSeconds = clip?.stopSeconds ?? defaultStopSeconds; $('stop-seconds').value = stopSeconds;
+  tableId = Math.max(0,...(geometry.tables ?? []).map(table => Number(table.id))); width = height = 0;
+  videoRepeats = 0; engineOffset = 0; updateSourceControls();
   picturesCounted = picturesSeen = 0; lastRunMs = null; tableRows.clear(); $('table-list').replaceChildren();
   $('spot-title').textContent = titles[spot];
   $('hint').textContent = spot === 'walkway' ? 'Drag the orange line to where people walk past.' : spot === 'tables' ? 'Drag a box onto each table.' : spot === 'doorway' ? 'Drag the line across the doorway.' : spot === 'shelf' ? 'Drag the box onto the shelf.' : 'Drag the box around people waiting to pay.';
@@ -159,7 +174,7 @@ async function waitForPicture(token) {
     let playing = false;
     const timeout = setTimeout(() => finish(new Error('Camera timed out')),15000);
     const ready = () => { if (playing && video.readyState >= 2 && video.videoWidth) finish(); };
-    const failed = () => finish(new Error('Camera failed'));
+    const failed = () => finish(new Error('Picture unavailable'));
     function finish(error) {
       clearTimeout(timeout); video.removeEventListener('loadeddata',ready); video.removeEventListener('resize',ready); video.removeEventListener('error',failed);
       controller.signal.removeEventListener('abort',failed);
@@ -168,7 +183,7 @@ async function waitForPicture(token) {
     }
     controller.signal.addEventListener('abort',failed,{ once: true });
     video.addEventListener('loadeddata',ready); video.addEventListener('resize',ready); video.addEventListener('error',failed);
-    Promise.resolve(video.play()).then(() => { playing = true; ready(); },failed);
+    Promise.resolve(video.play()).then(() => { playing = true; ready(); },error => finish(error));
     if (token !== generation) failed();
   });
 }
@@ -234,12 +249,12 @@ async function ensureModel(token) {
     if (token === generation) {
       loadingModel = false; countingPaused = true; readySince = null; clearInterval(rateTimer);
       lastProblem = error.code === 'MODEL_DOWNLOAD' ? 'The counter model could not download; check the model files and reload.' : 'The counter could not start in this browser; reload or try a current browser.';
-      say(lastProblem); render(); $('live').textContent = 'Camera is on; counting has not started.';
+      say(lastProblem); render(); $('live').textContent = isVideo() ? 'Video is playing; counting has not started.' : 'Camera is on; counting has not started.';
     }
   }
 }
 function schedule(token) {
-  if (token !== generation || !cameraOn) return;
+  if (token !== generation || !cameraOn || repeating) return;
   const run = metadata => {
     const activeRunner = runner;
     frameTask = frame(token,metadata).catch(error => {
@@ -269,7 +284,7 @@ async function frame(token, metadata) {
   lastVideoTime = video.currentTime;
   if (video.readyState < 2 || editing) { schedule(token); return; }
   lastRun = realTime;
-  const t = Math.max(realTime,lastTime+.000001);
+  const t = Math.max(realTime + engineOffset,lastTime+.000001);
   lastTime = t;
   resizePicture();
   const frameRevision = revision, currentRunner = runner, started = performance.now();
@@ -300,11 +315,21 @@ async function frame(token, metadata) {
   schedule(token);
 }
 async function startCamera() {
-  const token = stopCamera(); show('counting'); say('Opening the camera.');
+  const token = stopCamera(); show('counting'); say(isVideo() ? 'Opening the video.' : 'Opening the camera.');
+  updateSourceControls(); videoRepeats = 0; engineOffset = 0; lastProblem = '';
   $('stop-camera').hidden = false; $('restart-camera').hidden = true;
   if (!inputContext || typeof WebAssembly === 'undefined') { say('This browser cannot run the counter; open this page in a current browser.'); return; }
   try {
-    if (source === 'wifi') {
+    if (isVideo()) {
+      mirrored = false; video.muted = true; video.playsInline = true; video.playbackRate = 1;
+      if (source === 'file') {
+        if (!ownFile) throw new Error('No file');
+        ownURL = URL.createObjectURL(ownFile); video.src = ownURL;
+      } else {
+        if (!clips[spot]) throw new Error('No clip');
+        video.src = clips[spot].file;
+      }
+    } else if (source === 'wifi') {
       if (!helper || !cameraName) throw new Error('No helper');
       const stop = await helper.attach(video,cameraName);
       if (typeof stop !== 'function') throw new Error('No stop function');
@@ -332,10 +357,74 @@ async function startCamera() {
     await ensureModel(token);
   } catch (error) {
     if (token !== generation) return;
-    stopCamera(source === 'wifi' ? 'The Wi-Fi camera could not connect; check its address and the Mac helper, then try again.' : cameraError(error));
+    stopCamera(isVideo() ? videoError(error) : source === 'wifi' ? 'The Wi-Fi camera could not connect; check its address and the Mac helper, then try again.' : cameraError(error));
   }
 }
-async function chooseSpot(next) { stopCamera(); configureSpot(next); await startCamera(); }
+function updateStartSource() {
+  $('use-camera').setAttribute('aria-pressed', String(startSource === 'device'));
+  $('use-test').setAttribute('aria-pressed', String(startSource === 'test'));
+  $('source-promise').textContent = startSource === 'test'
+    ? 'Plays a test video in this page. Nothing is recorded and nothing leaves this device.'
+    : "Uses this device's camera. Nothing is recorded and nothing leaves this device.";
+  for (const button of document.querySelectorAll('[data-spot]')) {
+    const small = button.querySelector('small');
+    button.dataset.description ??= small.textContent;
+    button.disabled = startSource === 'test' && !clips[button.dataset.spot];
+    small.textContent = button.disabled ? 'No test video for this spot yet' : button.dataset.description;
+  }
+}
+function updateSourceControls() {
+  $('source-camera').textContent = source === 'wifi' ? 'Wi-Fi camera' : 'Camera';
+  $('source-camera').setAttribute('aria-pressed', String(!isVideo()));
+  $('source-test').setAttribute('aria-pressed', String(source === 'test'));
+  $('source-file').setAttribute('aria-pressed', String(source === 'file'));
+  $('source-test').hidden = !clips[spot];
+  $('stop-camera').textContent = isVideo() ? 'Stop the video' : 'Stop and turn the camera off';
+  $('counting-screen').classList.toggle('video-source', isVideo());
+  $('counting-screen').setAttribute('aria-label', isVideo() ? 'Video and counts' : 'Camera and counts');
+  video.setAttribute('aria-label', isVideo() ? 'Video picture' : 'Live camera picture');
+  $('video-credit').hidden = !isVideo();
+  const credit = clips[spot]?.credit;
+  $('video-credit').textContent = isVideo() ? (source === 'test'
+    ? (credit ? `Test video: ${credit}` : 'Test video')
+    : 'Your own video. It plays on this device and is not uploaded.') + ' The video repeats, so the counts keep growing.' : '';
+}
+function videoError(error) {
+  if (error?.name === 'NotAllowedError') return 'Tap Start counting again to play the video.';
+  return source === 'file' ? 'This video could not be played here. Try an MP4 file.'
+    : 'The test video could not load; check the connection and try again.';
+}
+function selectSource(next, file = null) {
+  stopCamera(); ownFile = file; source = next;
+  if (next === 'device' || next === 'wifi') { startSource = 'device'; updateStartSource(); }
+  configureSpot(spot);
+  return startCamera();
+}
+async function chooseSpot(next) {
+  if (startSource === 'test' && !clips[next]) return;
+  stopCamera(); ownFile = null;
+  source = startSource === 'test' ? 'test' : source === 'wifi' ? 'wifi' : 'device';
+  configureSpot(next); await startCamera();
+}
+async function repeatVideo() {
+  if (!isVideo() || !cameraOn || repeating) return;
+  const token = generation;
+  repeating = true; cancelPicture();
+  await frameTask;
+  if (token !== generation || !cameraOn) return;
+  const jump = repeatTimeline(lastTime, performance.now()/1000, engineOffset);
+  for (const t of jump.times) { tracker.update([],t); counter.update([],t); }
+  engineOffset = jump.offset; lastTime = jump.times.at(-1);
+  people = []; counts = counter.snapshot(); draw(); render();
+  lastVideoTime = -1; video.currentTime = 0;
+  try {
+    await waitForPicture(token);
+    if (token !== generation) return;
+    videoRepeats++; repeating = false;
+    if (!loadingModel && !countingPaused && runner) schedule(token);
+  } catch (error) { if (token === generation) stopCamera(videoError(error)); }
+}
+
 async function refreshCameras() {
   const result = await helper.listCameras();
   const cameras = Array.isArray(result) ? result : Array.isArray(result?.cameras) ? result.cameras : Object.keys(result ?? {});
@@ -346,7 +435,7 @@ async function refreshCameras() {
     const li = document.createElement('li'), use = document.createElement('button'), remove = document.createElement('button');
     use.className = remove.className = 'chip'; use.textContent = `Use camera ${i+1}`; remove.textContent = 'Remove';
     remove.setAttribute('aria-label',`Remove camera ${i+1}`);
-    use.addEventListener('click', () => { cameraName = name; source = 'wifi'; if (spot) void startCamera(); else { show('start'); say('Pick where this camera points.'); } });
+    use.addEventListener('click', () => { cameraName = name; startSource = 'device'; updateStartSource(); if (spot) void selectSource('wifi'); else { source = 'wifi'; show('start'); say('Pick where this camera points.'); } });
     remove.addEventListener('click', async () => {
       remove.disabled = true;
       try { await helper.removeCamera(name); if (cameraName === name) { stopCamera(); cameraName = null; source = 'device'; } await refreshCameras(); }
@@ -370,7 +459,7 @@ $('choose-source').addEventListener('click', async () => {
   if (helper && screen === 'source') { try { await refreshCameras(); } catch { say('The camera list could not load; check the Mac helper and try again.'); } }
 });
 $('source-back').addEventListener('click', () => { stopCamera(); show('start'); say(''); });
-$('device-source').addEventListener('click', () => { source = 'device'; cameraName = null; show('start'); say(''); });
+$('device-source').addEventListener('click', () => { stopCamera(); ownFile = null; source = 'device'; startSource = 'device'; updateStartSource(); cameraName = null; show('start'); say(''); });
 $('camera-form').addEventListener('submit', async event => {
   event.preventDefault(); if (!helper) return;
   const address = $('camera-address').value.trim(); $('camera-address').value = '';
@@ -382,12 +471,12 @@ $('camera-form').addEventListener('submit', async event => {
     const name = typeof added === 'string' ? added : added?.name;
     if (typeof name !== 'string' || !name) throw new Error('No camera name');
     $('camera-address').value = added.address ?? '';
-    cameraName = name; source = 'wifi';
-    if (spot) await startCamera(); else { show('start'); say('Pick where this camera points.'); }
+    cameraName = name; startSource = 'device'; updateStartSource();
+    if (spot) await selectSource('wifi'); else { source = 'wifi'; show('start'); say('Pick where this camera points.'); }
   } catch { if (token === generation) say('The camera could not be added; check its address and the Mac helper, then try again.'); }
   finally { $('connect-camera').disabled = false; }
 });
-$('change-spot').addEventListener('click', () => { stopCamera(); show('start'); say(''); });
+$('change-spot').addEventListener('click', () => { stopCamera(); ownFile = null; show('start'); say(''); });
 $('stop-camera').addEventListener('click', () => { stopCamera(); $('restart-camera').focus(); });
 $('restart-camera').addEventListener('click', () => { void startCamera(); });
 $('switch-camera').addEventListener('click', () => {
@@ -403,16 +492,31 @@ $('more').addEventListener('click', () => {
   render(); $('more-sheet').showModal();
 });
 $('close-more').addEventListener('click', () => $('more-sheet').close());
-$('model-choice').addEventListener('change', () => {
-  modelChosen = true; model = $('model-choice').value;
+$('model-choice').addEventListener('change', async () => {
+  const selected = $('model-choice').value, tokenBefore = generation;
+  // Let the boundary finish retiring people before a model change replaces its generation.
+  if (repeating) await repeatTask;
+  if (tokenBefore !== generation) return;
+  modelChosen = true; model = selected;
   if (cameraOn) {
     const token = ++generation; cancelPicture(); countedTimes = []; picturesPerSecond = 0;
     void ensureModel(token);
   }
 });
-video.addEventListener('error', () => { if (cameraOn) stopCamera('The camera picture stopped; reconnect the camera and start again.'); });
+$('use-camera').addEventListener('click', () => { startSource = 'device'; source = 'device'; updateStartSource(); });
+$('use-test').addEventListener('click', () => { startSource = 'test'; updateStartSource(); });
+$('source-camera').addEventListener('click', () => { if (isVideo()) void selectSource('device'); });
+$('source-test').addEventListener('click', () => { if (source !== 'test' && clips[spot]) void selectSource('test'); });
+$('source-file').addEventListener('click', () => { $('own-video').click(); });
+$('own-video').addEventListener('change', () => {
+  const file = $('own-video').files?.[0];
+  $('own-video').value = '';
+  if (file) void selectSource('file', file);
+});
+video.addEventListener('ended', () => { repeatTask = repeatVideo(); });
+video.addEventListener('error', () => { if (cameraOn) stopCamera(isVideo() ? videoError() : 'The camera picture stopped; reconnect the camera and start again.'); });
 window.addEventListener('pagehide', () => {
-  stopCamera();
+  stopCamera(); ownFile = null;
   modelQueue = modelQueue.catch(() => {}).then(async () => {
     await frameTask;
     const previous = runner; runner = null; runnerModel = null;
@@ -420,4 +524,5 @@ window.addEventListener('pagehide', () => {
   }).catch(() => {});
 });
 let helperReady = null;
+updateStartSource();
 if (Object.hasOwn(titles,params.get('spot'))) void chooseSpot(params.get('spot'));
