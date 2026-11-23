@@ -155,3 +155,30 @@ dialog{max-height:calc(100% - 24px);overflow-y:auto}
 #history-sessions span,#history-sessions b{display:block}
 #history-sessions span{color:var(--ink2);margin-top:3px}
 #clear-history{font-size:14px}
+
+/* Named cameras, without setup pictures. */
+#cameras-screen{max-width:390px;overflow-wrap:anywhere}
+#cameras-title:focus{outline:none}
+#camera-list{list-style:none;padding:0;margin:0}
+#camera-list>li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:12px;margin:0 0 12px;background:var(--canvas);border-radius:16px;box-shadow:var(--card)}
+#camera-list>li.needs-you{box-shadow:var(--card),inset 0 0 0 2px var(--black)}
+.camera-open{min-width:0;min-height:40px;padding:0;border:0;background:transparent;text-align:left;border-radius:6px;overflow-wrap:anywhere}
+.camera-name{display:block;font-size:16px;line-height:1.25;margin-bottom:6px}
+.kind{display:inline-block;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:3px 8px;background:var(--canvas)}
+.src{display:block;margin-top:4px;font-size:12px;color:var(--mute)}
+.camera-more{align-self:start;min-width:40px;padding:6px;font-size:18px}
+.camera-status{align-self:start;margin:0;padding:5px 9px;border-radius:12px;background:var(--warm);font-size:12px;color:var(--ink2)}
+.needs-you .camera-status{background:var(--black);color:var(--canvas)}
+.needs-you .camera-status::before{content:"";display:inline-block;width:8px;height:8px;margin-right:6px;background:currentColor;border-radius:1px}
+.camera-today{grid-column:1 / -1;text-align:right;margin:0;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums}
+.camera-count,.camera-menu,.camera-rename-form{grid-column:1 / -1}
+.camera-count{margin-top:0}
+.camera-menu{padding:4px;border:1px solid var(--line);border-radius:12px;box-shadow:var(--card)}
+.camera-menu button{display:block;width:100%;min-height:40px;border:0;background:var(--canvas);text-align:left;padding:8px;font-size:14px;border-radius:8px}
+.camera-menu button+button{border-top:1px solid var(--line)}
+.camera-rename-form{display:flex;gap:6px}
+.camera-name-input{min-width:0;width:100%;min-height:40px;font-size:16px;border:1px solid var(--line);border-radius:8px;padding:8px}
+#cameras-history{margin-top:8px;background:transparent}
+#history-camera{padding:10px 0 16px;font-size:14px}
+#history-camera p{margin:4px 0}
+#history-none{font-size:14px}

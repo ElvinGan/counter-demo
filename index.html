@@ -20,7 +20,7 @@
 <main class="page">
 <p id="status" class="status" role="status" aria-live="polite"></p>
 <section id="start-screen" class="phone" aria-labelledby="start-title">
-<div class="pad"><h1 id="start-title" class="q">Where is this camera pointing?</h1>
+<div class="pad"><button id="start-back" class="chip" hidden>Back to your cameras</button><h1 id="start-title" class="q">Where is this camera pointing?</h1>
 <p class="sub">Pick one. You can change it later.</p>
 <div class="source-pills" role="group" aria-label="Count from">
 <button id="use-camera" class="chip" aria-pressed="true">This device's camera</button>
@@ -34,6 +34,15 @@
 <p class="promise"><svg aria-hidden="true"><use href="#lock"/></svg><span id="source-promise">Uses this device's camera. No pictures are kept and nothing leaves this device. Counts are kept on this device.</span></p>
 <button id="choose-source" class="other">Use a camera on the Wi-Fi instead</button>
 <button id="open-history" class="other">History</button>
+</div></section>
+<section id="cameras-screen" class="phone" hidden aria-labelledby="cameras-title">
+<div class="bar"><strong id="cameras-title">Your cameras</strong></div>
+<div class="pad">
+<div id="camera-filter" class="source-pills" role="group" aria-label="Show" hidden></div>
+<ul id="camera-list"></ul>
+<button id="add-camera" class="btn">Add a camera</button>
+<button id="cameras-history" class="other">History</button>
+<p class="promise">Uses this device's camera. No pictures are kept and nothing leaves this device. Counts are kept on this device.</p>
 </div></section>
 <section id="counting-screen" class="counting" hidden aria-label="Camera and counts">
 <div class="bar"><strong id="spot-title">Walkway</strong><button id="change-spot" class="chip">Change spot</button></div>
@@ -89,6 +98,8 @@
 <button id="range-today" class="chip" aria-pressed="true">Today</button>
 <button id="range-week" class="chip" aria-pressed="false">7 days</button>
 </div>
+<div id="history-camera" hidden><p id="history-camera-kind"></p><p id="history-camera-status"></p><button id="history-count" class="btn">Start counting</button></div>
+<p id="history-none" hidden>No counts kept for this camera yet.</p>
 <div id="history-summary" hidden><b id="history-main">0</b><span id="history-main-label">walked past</span><p id="history-covered">Counted 0 min in this range</p></div>
 <ol id="history-bars" hidden></ol>
 <ul id="history-sessions" hidden></ul>

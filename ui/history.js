@@ -1,9 +1,9 @@
 import { historyReport, durationWords } from './keep.js';
 
-export function historyScreen({ keeper, back, onProblem, root = document, now = () => Date.now(),
+export function historyScreen({ keeper, back, onProblem, start = () => {}, root = document, now = () => Date.now(),
   later = setTimeout, cancel = clearTimeout }) {
   const $ = id => root.getElementById(id);
-  let sessions = [], events = [], selection = '', week = false, armedUntil = 0, timer = null, revision = 0;
+  let sessions = [], events = [], cameras = [], camera = null, selection = '', week = false, armedUntil = 0, timer = null, revision = 0;
   const clearText = 'Clear the history on this device';
   function node(tag,text) {
     const element = root.createElement(tag);
@@ -14,15 +14,27 @@ export function historyScreen({ keeper, back, onProblem, root = document, now = 
     armedUntil = 0; cancel(timer); timer = null; $('clear-history').textContent = clearText;
   }
   function draw() {
-    const empty = sessions.length === 0;
+    const empty = sessions.length === 0 && !cameras.some(c => c.removedAt === null);
     $('history-empty').hidden = !empty;
     for (const id of ['history-what','history-bars','history-sessions','history-summary','history-ranges','history-what-label','clear-history']) $(id).hidden = empty;
     $('range-today').setAttribute('aria-pressed',String(!week)); $('range-week').setAttribute('aria-pressed',String(week));
-    const report = historyReport(sessions,events,{ selection,week,now: now(),openId: keeper.sessionId });
+    const report = historyReport(sessions,events,{ selection,week,now: now(),openId: keeper.sessionId, cameras });
     selection = report.selection;
-    $('history-what').replaceChildren(...report.options.map(option => {
-      const element = node('option',option.label); element.value = option.value; return element;
+    $('history-what').replaceChildren(...['A group','One camera'].flatMap(group => {
+      const options = report.options.filter(option => option.group === group);
+      if (!options.length) return [];
+      const element = node('optgroup'); element.label = group;
+      element.append(...options.map(option => { const el = node('option',option.label); el.value = option.value; return el; }));
+      return [element];
     }));
+    camera = report.camera;
+    $('history-camera').hidden = !camera;
+    $('history-count').hidden = !camera || camera.removed;
+    $('history-camera-kind').textContent = camera ? `${camera.kind}, ${camera.source}` : '';
+    $('history-camera-status').textContent = camera?.status ?? '';
+    const none = camera && !sessions.some(s => s.cameraId === camera.id);
+    $('history-none').hidden = !none;
+    $('history-bars').hidden = empty || Boolean(none);
     $('history-what').value = selection;
     $('history-main').textContent = report.main; $('history-main-label').textContent = report.label;
     $('history-covered').textContent = report.covered;
@@ -49,11 +61,12 @@ export function historyScreen({ keeper, back, onProblem, root = document, now = 
   async function refresh() {
     const current = ++revision;
     try {
-      const data = await keeper.read();
+      const [data, saved] = await Promise.all([keeper.read(),keeper.listCameras()]);
       if (current !== revision) return;
-      sessions = data.sessions; events = data.events; draw();
+      sessions = data.sessions; events = data.events; cameras = saved; draw();
     } catch { if (current === revision) onProblem('History could not be read on this device. Try opening it again.'); }
   }
+  $('history-count').addEventListener('click',() => { if (camera && !camera.removed) start(cameras.find(c => c.id === camera.id)); });
   $('history-back').addEventListener('click',() => { revision++; disarm(); back(); });
   $('history-what').addEventListener('change',() => { selection = $('history-what').value; draw(); });
   $('range-today').addEventListener('click',() => { week = false; draw(); });
@@ -69,5 +82,5 @@ export function historyScreen({ keeper, back, onProblem, root = document, now = 
       timer = later(disarm,5000);
     }
   });
-  return { open() { selection = ''; week = false; disarm(); return refresh(); } };
+  return { close() { revision++; disarm(); }, open({ select = '' } = {}) { selection = select; week = false; disarm(); return refresh(); } };
 }

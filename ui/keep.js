@@ -2,6 +2,43 @@ export const HOUR = 3600000, DAY = 24 * HOUR;
 export const groupNames = { walkway: 'All walkways', doorway: 'All doorways', counter: 'All counters', shelf: 'All shelves', tables: 'All tables' };
 export const mainLabels = { walkway: 'walked past', doorway: 'walked in', shelf: 'stopped at the shelf', counter: 'longest queue', tables: 'most tables taken at once' };
 
+export const spotTitles = { walkway: 'Walkway', doorway: 'Doorway', counter: 'Counter', shelf: 'Shelf', tables: 'Tables' };
+export const kindNames = { walkway: 'Walkways', doorway: 'Doorways', counter: 'Counters', shelf: 'Shelves', tables: 'Tables' };
+export function cameraNameFor(spot, cameras) {
+  const title = spotTitles[spot], used = new Set(cameras.filter(c => c.removedAt === null).map(c => c.name));
+  let name = title, suffix = 2;
+  while (used.has(name)) name = `${title} ${suffix++}`;
+  return name;
+}
+export function cameraSource(camera) {
+  return camera.source === 'wifi' ? `Wi-Fi camera: ${camera.label}` : camera.label || "This device's camera";
+}
+export function cameraCard(camera, sessions, events, { now, openId }) {
+  const own = sessions.filter(s => s.cameraId === camera.id);
+  const latest = [...own].sort((a,b) => b.startedAt-a.startedAt)[0];
+  const midnight = new Date(now); midnight.setHours(0,0,0,0);
+  function moment(at) {
+    const date = new Date(at);
+    return date.toDateString() === midnight.toDateString() ? clockWords(at)
+      : `${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][date.getDay()]} ${date.getDate()}, ${clockWords(at)}`;
+  }
+  let status = 'Not counted yet', needsYou = false;
+  if (latest) {
+    const end = sessionEnd(latest,now,openId), time = moment(end.at);
+    status = { counting: `Counting since ${moment(latest.startedAt)}`, stopped: `Stopped by you, ${time}`,
+      left: `Stopped, ${time}`, changed: `Stopped, ${time}`, problem: `Stopped by a problem, ${time}`,
+      interrupted: `Counting was interrupted, last counted ${time}`, lost: `Stopped without warning, last heard ${time}` }[end.reason];
+    needsYou = ['problem','interrupted','lost'].includes(end.reason);
+  }
+  const summary = summarise(own,events,{ from: midnight.getTime(),to: now+1,step: DAY,now,openId,spot: camera.spot });
+  // A first picture can have an event even before a measurable interval has elapsed.
+  const hasToday = summary.coveredMs > 0 || own.some(s => s.startedAt >= midnight.getTime() && s.startedAt <= now)
+    || events.some(e => e.at >= midnight.getTime() && e.at <= now && own.some(s => s.id === e.sessionId));
+  const today = !hasToday ? 'No counts today' : camera.spot === 'counter' ? `Longest queue today: ${summary.main}`
+    : camera.spot === 'tables' ? `Most tables taken today: ${summary.main}` : `${summary.main} ${mainLabels[camera.spot]} today`;
+  return { status, needsYou, today };
+}
+
 export function keptMeasures(spot, counts) {
   switch (spot) {
     case 'walkway': return { sums: { aToB: counts.aToB, bToA: counts.bToA, stops: counts.stopped.stops }, levels: {} };
@@ -100,16 +137,23 @@ export function sessionWords(session, sessions, events, now, openId) {
   return session.spot === 'counter' ? `longest queue ${peak}` : `most tables taken ${peak}`;
 }
 
-export function historyReport(sessions, events, { selection, week = false, now, openId }) {
+export function historyReport(sessions, events, { selection, week = false, now, openId, cameras = [] }) {
   const newest = [...sessions].sort((a,b) => b.startedAt-a.startedAt);
   const options = Object.entries(groupNames).filter(([spot]) => sessions.some(s => s.spot === spot))
-    .map(([spot,label]) => ({ value: `group:${spot}`, label }));
-  const cameras = new Map();
-  for (const s of newest) if (!cameras.has(s.cameraKey)) cameras.set(s.cameraKey,s.cameraName);
-  for (const [key,label] of cameras) options.push({ value: `camera:${key}`, label });
-  if (!options.some(o => o.value === selection)) selection = newest.length ? `group:${newest[0].spot}` : '';
+    .map(([spot,label]) => ({ value: `group:${spot}`, label, group: 'A group' }));
+  const saved = [...cameras].sort((a,b) => a.createdAt-b.createdAt);
+  for (const camera of [...saved.filter(c => c.removedAt === null),...saved.filter(c => c.removedAt !== null && sessions.some(s => s.cameraId === c.id))]) {
+    options.push({ value: `camera:cam:${camera.id}`, label: camera.name + (camera.removedAt === null ? '' : ' (removed)'), group: 'One camera' });
+  }
+  const quick = new Map();
+  for (const s of newest) if (!s.cameraId && !quick.has(s.cameraKey)) quick.set(s.cameraKey,s.cameraName);
+  for (const [key,label] of quick) options.push({ value: `camera:${key}`, label, group: 'One camera' });
+  if (!options.some(o => o.value === selection)) selection = newest.length ? `group:${newest[0].spot}` : options[0]?.value ?? '';
+  const picked = saved.find(c => selection === `camera:cam:${c.id}`);
+  const camera = picked ? { id: picked.id, name: picked.name, kind: spotTitles[picked.spot], source: cameraSource(picked),
+    status: cameraCard(picked,sessions,events,{now,openId}).status, removed: picked.removedAt !== null } : null;
   const selected = sessions.filter(s => selection === `group:${s.spot}` || selection === `camera:${s.cameraKey}`);
-  const spot = selected[0]?.spot ?? 'walkway';
+  const spot = picked?.spot ?? selected[0]?.spot ?? 'walkway';
   const midnight = new Date(now); midnight.setHours(0,0,0,0);
   const first = new Date(midnight); if (week) first.setDate(first.getDate()-6);
   const from = first.getTime(), to = now+1;
@@ -133,9 +177,9 @@ export function historyReport(sessions, events, { selection, week = false, now, 
     rows = summarise(selected,events,{ ...range, from: start.getTime(),to,step: HOUR }).rows
       .map(row => ({ ...row, fullMs: HOUR, label: `${clockWords(row.from)}` }));
   }
-  return { ...summary, rows, options, selection, label: mainLabels[spot],
+  return { ...summary, rows, options, selection, camera, label: mainLabels[spot],
     covered: `Counted ${durationWords(summary.coveredMs)} in this range${summary.cameras > 1 ? ` across ${summary.cameras} cameras` : ''}`,
-    sessions: list.map(s => { const end = sessionEnd(s,now,openId); return { id: s.id,cameraName: s.cameraName,
+    sessions: list.map(s => { const end = sessionEnd(s,now,openId); return { id: s.id,cameraName: saved.find(c => c.id === s.cameraId)?.name ?? s.cameraName,
       time: `${clockWords(s.startedAt)} to ${end.reason === 'counting' ? 'now' : clockWords(end.at)}`,
       end: endWords(end), totals: sessionWords(s,selected,events,now,openId) }; }) };
 }

@@ -8,6 +8,7 @@ import { clips } from './videos/clips.js';
 import { clipGeometry, repeatTimeline } from './ui/video.js';
 import { deviceStore, sessionKeeper } from './ui/store.js';
 import { historyScreen } from './ui/history.js';
+import { cameraBook, camerasScreen } from './ui/cameras.js';
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay');
 const titles = { walkway: 'Walkway', doorway: 'Doorway', counter: 'Counter', shelf: 'Shelf', tables: 'Tables' };
@@ -19,6 +20,8 @@ const defaultStopSeconds = stopSeconds;
 let startSource = params.get('source') === 'test' ? 'test' : 'device';
 let ownFile = null, ownURL = null, videoRepeats = 0, engineOffset = 0, repeating = false;
 const isVideo = () => source === 'test' || source === 'file';
+let ready = false, historyFrom = 'start';
+const shortcut = Object.hasOwn(titles,params.get('spot'));
 let screen = 'start', spot = null, cameraOn = false, backend = 'wasm';
 let picturesCounted = 0, picturesSeen = 0, picturesPerSecond = 0, counts = {};
 let lastRunMs = null, lastProblem = '', readySince = null, lastCountAt = null, countingPaused = false;
@@ -36,17 +39,50 @@ let freeSince = new Map(), tableRows = new Map(), lastRender = 0;
 const input = document.createElement('canvas'), inputContext = input.getContext('2d', { willReadFrequently: true });
 const kept = sessionKeeper({ store: deviceStore(), onProblem: message => { lastProblem = message; render(); },
   every: setInterval, cancel: clearInterval });
-const history = historyScreen({ keeper: kept, root: document, later: setTimeout, cancel: clearTimeout, back: () => { show('start'); say(''); }, onProblem: say });
-function keepCount(before) {
-  const label = source === 'device' ? stream?.getVideoTracks()[0]?.label ?? ''
+const book = cameraBook({ keeper: kept, onProblem: message => { lastProblem = message; say(message); },
+  changed: () => { $('start-back').hidden = book.count === 0; } });
+const cameraList = camerasScreen({ book,keeper: kept,start: startSaved,report: openHistory,say,root: document,later: setTimeout,cancel: clearTimeout });
+const history = historyScreen({ keeper: kept, root: document, later: setTimeout, cancel: clearTimeout,
+  back: () => { if (historyFrom === 'cameras') openCameras(); else show('start'); say(''); }, start: startSaved, onProblem: say });
+function cameraConfig() {
+  const label = source === 'device' ? (stream ? stream.getVideoTracks()[0]?.label ?? '' : book.active?.label ?? '')
     : source === 'wifi' ? cameraName ?? '' : source === 'file' ? ownFile?.name ?? '' : '';
-  kept.counted({ spot,source,label,geometry,inSide,stopSeconds,model },counts,before);
+  return { spot,source,label,deviceId: source === 'device' ? selectedDevice ?? '' : '',geometry,inSide,stopSeconds,model };
+}
+function cameraHeading() {
+  $('spot-title').textContent = book.active?.name ?? titles[spot];
+  $('change-spot').textContent = book.active ? 'Cameras' : 'Change spot';
+}
+function keepCount(before) {
+  const config = cameraConfig(), camera = book.counted(config);
+  cameraHeading(); kept.counted({ ...config,camera },counts,before);
+}
+function openCameras() {
+  stopCamera(); book.begin(); ownFile = null; show('cameras'); say(''); void cameraList.open();
+}
+function openHistory(select) {
+  historyFrom = screen === 'cameras' ? 'cameras' : 'start';
+  stopCamera(); show('history'); say(''); void history.open({ select });
+}
+async function startSaved(camera) {
+  stopCamera(); book.begin(camera); ownFile = null; source = camera.source; startSource = 'device';
+  selectedDevice = camera.deviceId || null; cameraName = camera.source === 'wifi' ? camera.label : null;
+  updateStartSource(); configureSpot(camera.spot);
+  if (source === 'wifi') {
+    show('counting'); const token = generation;
+    helperReady ??= discoverHelper(); await helperReady;
+    if (token !== generation || screen !== 'counting') return;
+    if (!helper) { say('Open this page from the helper on a Mac to use a camera on the Wi-Fi.'); return; }
+  }
+  await startCamera();
 }
 function freezeSnapshot(value) {
   if (Array.isArray(value)) return Object.freeze(value.map(freezeSnapshot));
   return value && typeof value === 'object' ? Object.freeze(Object.fromEntries(Object.entries(value).map(([k,v]) => [k,freezeSnapshot(v)]))) : value;
 }
 Object.defineProperty(window, '__footfall', { value: Object.freeze({
+  get ready() { return ready; }, get cameraId() { return screen === 'counting' ? book.active?.id ?? null : null; },
+  get cameraCount() { return book.count; },
   get screen() { return screen; }, get spot() { return spot; }, get backend() { return backend; },
   get model() { return model; }, get picturesCounted() { return picturesCounted; },
   get picturesPerSecond() { return pictureRate(countedTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
@@ -69,10 +105,14 @@ function cancelPicture() {
   videoCallback = null;
 }
 function show(next) {
+  if (screen === 'counting' && next !== 'counting') stopCamera();
+  if (screen === 'cameras') cameraList.close();
+  if (screen === 'history') history.close();
   screen = next;
   $('start-screen').hidden = next !== 'start'; $('counting-screen').hidden = next !== 'counting'; $('source-screen').hidden = next !== 'source';
+  $('cameras-screen').hidden = next !== 'cameras';
   $('history-screen').hidden = next !== 'history';
-  const heading = next === 'start' ? $('start-title') : next === 'counting' ? $('spot-title') : next === 'history' ? $('history-title') : $('source-title');
+  const heading = next === 'cameras' ? $('cameras-title') : next === 'start' ? $('start-title') : next === 'counting' ? $('spot-title') : next === 'history' ? $('history-title') : $('source-title');
   heading.tabIndex = -1; heading.focus();
 }
 function stopCamera(message = '', reason = 'left') {
@@ -96,7 +136,7 @@ function stopCamera(message = '', reason = 'left') {
   return generation;
 }
 function resetCounts(announce = false) {
-  if (cameraOn) kept.end('changed');
+  if (cameraOn) { kept.end('changed'); book.update(cameraConfig()); }
   revision++; tracker = new Tracker(); people = [];
   counter = makeCounters(spot, pixelGeometry(geometry,width || 1280,height || 720),stopSeconds,inSide);
   counts = counter.snapshot(); freeSince = new Map();
@@ -170,11 +210,13 @@ function configureSpot(next) {
   spot = next;
   const clip = source === 'test' ? clips[spot] : null;
   geometry = clipGeometry(spot, clip?.geometry); inSide = clip?.inSide ?? 1;
-  stopSeconds = clip?.stopSeconds ?? defaultStopSeconds; $('stop-seconds').value = stopSeconds;
+  stopSeconds = clip?.stopSeconds ?? defaultStopSeconds;
+  if (book.own(source)) { geometry = structuredClone(book.active.geometry); inSide = book.active.inSide; stopSeconds = book.active.stopSeconds; }
+  $('stop-seconds').value = stopSeconds;
   tableId = Math.max(0,...(geometry.tables ?? []).map(table => Number(table.id))); width = height = 0;
   videoRepeats = 0; engineOffset = 0; updateSourceControls();
   picturesCounted = picturesSeen = 0; lastRunMs = null; tableRows.clear(); $('table-list').replaceChildren();
-  $('spot-title').textContent = titles[spot];
+  cameraHeading();
   $('hint').textContent = spot === 'walkway' ? 'Drag the orange line to where people walk past.' : spot === 'tables' ? 'Drag a box onto each table.' : spot === 'doorway' ? 'Drag the line across the doorway.' : spot === 'shelf' ? 'Drag the box onto the shelf.' : 'Drag the box around people waiting to pay.';
   $('stop-control').hidden = !['walkway','shelf'].includes(spot); $('flip-inside').hidden = spot !== 'doorway';
   $('add-table').hidden = spot !== 'tables'; $('tables-card').hidden = spot !== 'tables'; $('queue-time').hidden = spot !== 'counter';
@@ -364,6 +406,7 @@ async function startCamera() {
   updateSourceControls(); videoRepeats = 0; engineOffset = 0; lastProblem = '';
   $('stop-camera').hidden = false; $('restart-camera').hidden = true;
   if (!inputContext || typeof WebAssembly === 'undefined') { say('This browser cannot run the counter; open this page in a current browser.'); return; }
+  let missingCamera = false;
   try {
     if (isVideo()) {
       mirrored = false; video.muted = true; video.playsInline = true; video.playbackRate = 1;
@@ -375,7 +418,7 @@ async function startCamera() {
         video.src = clips[spot].file;
       }
     } else if (source === 'wifi') {
-      if (!helper || !cameraName) throw new Error('No helper');
+      if (!helper || !cameraName) { say('Open this page from the helper on a Mac to use a camera on the Wi-Fi.'); return; }
       const stop = await helper.attach(video,cameraName);
       if (typeof stop !== 'function') throw new Error('No stop function');
       if (token !== generation) { await stop(); return; }
@@ -384,7 +427,14 @@ async function startCamera() {
       if (!navigator.mediaDevices?.getUserMedia) { say('This browser cannot open the camera; use a current browser on a secure page or the Mac helper.'); $('restart-camera').hidden = false; return; }
       const constraints = { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false };
       if (selectedDevice) constraints.video.deviceId = { exact: selectedDevice };
-      const next = await navigator.mediaDevices.getUserMedia(constraints);
+      let next;
+      try { next = await navigator.mediaDevices.getUserMedia(constraints); }
+      catch (error) {
+        if (token !== generation) return;
+        if (!book.own(source) || !selectedDevice || !['NotFoundError','OverconstrainedError'].includes(error.name)) throw error;
+        delete constraints.video.deviceId;
+        next = await navigator.mediaDevices.getUserMedia(constraints); missingCamera = true;
+      }
       if (token !== generation) { next.getTracks().forEach(track => track.stop()); return; }
       stream = next; video.srcObject = stream;
       const settings = stream.getVideoTracks()[0].getSettings();
@@ -400,6 +450,7 @@ async function startCamera() {
       $('switch-camera').hidden = devices.length < 2;
     }
     await ensureModel(token);
+    if (missingCamera && token === generation) say('That camera was not found on this device; another camera is being used.');
   } catch (error) {
     if (token !== generation) return;
     stopCamera(isVideo() ? videoError(error) : source === 'wifi' ? 'The Wi-Fi camera could not connect; check its address and the Mac helper, then try again.' : cameraError(error));
@@ -411,7 +462,7 @@ function updateStartSource() {
   $('source-promise').textContent = startSource === 'test'
     ? 'Plays a test video in this page. No pictures are kept and nothing leaves this device. Counts are kept on this device.'
     : "Uses this device's camera. No pictures are kept and nothing leaves this device. Counts are kept on this device.";
-  for (const button of document.querySelectorAll('[data-spot]')) {
+  for (const button of document.querySelectorAll('.spot[data-spot]')) {
     const small = button.querySelector('small');
     button.dataset.description ??= small.textContent;
     button.disabled = startSource === 'test' && !clips[button.dataset.spot];
@@ -445,9 +496,9 @@ function selectSource(next, file = null) {
   configureSpot(spot);
   return startCamera();
 }
-async function chooseSpot(next) {
+async function chooseSpot(next, quick = false) {
   if (startSource === 'test' && !clips[next]) return;
-  stopCamera(); ownFile = null;
+  stopCamera(); book.begin(null,!quick && !shortcut && startSource !== 'test'); ownFile = null; selectedDevice = null;
   source = startSource === 'test' ? 'test' : source === 'wifi' ? 'wifi' : 'device';
   configureSpot(next); await startCamera();
 }
@@ -496,14 +547,17 @@ async function discoverHelper() {
     helper = candidate; $('wifi-choice').disabled = false; $('helper-state').textContent = 'Helper is running on this Mac';
   } catch { helper = null; }
 }
-for (const button of document.querySelectorAll('[data-spot]')) button.addEventListener('click', () => { void chooseSpot(button.dataset.spot); });
+for (const button of document.querySelectorAll('.spot[data-spot]')) button.addEventListener('click', () => { void chooseSpot(button.dataset.spot); });
 $('choose-source').addEventListener('click', async () => {
   stopCamera(); show('source'); say('');
   helperReady ??= discoverHelper();
   await helperReady;
   if (helper && screen === 'source') { try { await refreshCameras(); } catch { say('The camera list could not load; check the Mac helper and try again.'); } }
 });
-$('open-history').addEventListener('click', () => { show('history'); say(''); void history.open(); });
+$('open-history').addEventListener('click', () => openHistory());
+$('cameras-history').addEventListener('click', () => openHistory());
+$('start-back').addEventListener('click',openCameras);
+$('add-camera').addEventListener('click',() => { book.begin(); spot = null; source = 'device'; startSource = 'device'; selectedDevice = null; cameraName = null; updateStartSource(); show('start'); say(''); });
 $('source-back').addEventListener('click', () => { stopCamera(); show('start'); say(''); });
 $('device-source').addEventListener('click', () => { stopCamera(); ownFile = null; source = 'device'; startSource = 'device'; updateStartSource(); cameraName = null; show('start'); say(''); });
 $('camera-form').addEventListener('submit', async event => {
@@ -522,7 +576,10 @@ $('camera-form').addEventListener('submit', async event => {
   } catch { if (token === generation) say('The camera could not be added; check its address and the Mac helper, then try again.'); }
   finally { $('connect-camera').disabled = false; }
 });
-$('change-spot').addEventListener('click', () => { stopCamera(); ownFile = null; show('start'); say(''); });
+$('change-spot').addEventListener('click', () => {
+  if (book.active) openCameras();
+  else { stopCamera(); book.begin(); ownFile = null; spot = null; show('start'); say(''); }
+});
 $('stop-camera').addEventListener('click', () => { stopCamera('', 'stopped'); $('restart-camera').focus(); });
 $('restart-camera').addEventListener('click', () => { void startCamera(); });
 $('switch-camera').addEventListener('click', () => {
@@ -543,7 +600,7 @@ $('model-choice').addEventListener('change', () => {
 });
 $('use-camera').addEventListener('click', () => { startSource = 'device'; source = 'device'; updateStartSource(); });
 $('use-test').addEventListener('click', () => { startSource = 'test'; updateStartSource(); });
-$('source-camera').addEventListener('click', () => { if (isVideo()) void selectSource('device'); });
+$('source-camera').addEventListener('click', () => { if (isVideo()) { selectedDevice = book.active?.deviceId || null; cameraName = book.active?.source === 'wifi' ? book.active.label : cameraName; void selectSource(book.active?.source ?? 'device'); } });
 $('source-test').addEventListener('click', () => { if (source !== 'test' && clips[spot]) void selectSource('test'); });
 $('source-file').addEventListener('click', () => { $('own-video').click(); });
 $('own-video').addEventListener('change', () => {
@@ -563,4 +620,13 @@ window.addEventListener('pagehide', () => {
 });
 let helperReady = null;
 updateStartSource();
-if (Object.hasOwn(titles,params.get('spot'))) void chooseSpot(params.get('spot'));
+$('start-screen').hidden = true;
+const initialGeneration = generation;
+void book.load().then(() => {
+  if (generation === initialGeneration && screen === 'start') {
+    if (shortcut) void chooseSpot(params.get('spot'),true);
+    else if (book.count) openCameras();
+    else show('start');
+  }
+  ready = true;
+});

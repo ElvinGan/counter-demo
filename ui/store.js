@@ -12,7 +12,7 @@ function records(session, events) {
   const only = (value, keys) => {
     if (!value || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw new TypeError('Unknown count field');
   };
-  const fields = ['id','cameraKey','cameraName','spot','source','startedAt','lastAliveAt','endedAt','endReason','geometry','inSide','stopSeconds','model','totals'];
+  const fields = ['id','cameraId','cameraKey','cameraName','spot','source','startedAt','lastAliveAt','endedAt','endReason','geometry','inSide','stopSeconds','model','totals'];
   if (Object.keys(session).some(key => !fields.includes(key))) throw new TypeError('Unknown session field');
   plain(session);
   only(session.geometry,['line','zone','tables']);
@@ -31,6 +31,15 @@ function records(session, events) {
   }
   return copy({ session, events });
 }
+function cameraRecord(camera) {
+  const keys = ['id','name','spot','source','label','deviceId','geometry','inSide','stopSeconds','createdAt','removedAt'];
+  if (Object.keys(camera).some(key => !keys.includes(key))) throw new TypeError('Unknown camera field');
+  plain(camera);
+  if (typeof camera.name !== 'string' || !camera.name.trim() || camera.name.length > 40
+      || !['device','wifi'].includes(camera.source)) throw new TypeError('Invalid camera');
+  records({ geometry: camera.geometry, totals: { sums: {}, levels: {} } },[]);
+  return copy(camera);
+}
 function byRange(sessions, events, { from = -Infinity, to = Infinity } = {}) {
   const selected = sessions.filter(s => s.startedAt <= to && (s.endedAt ?? s.lastAliveAt) >= from);
   const ids = new Set(selected.map(s => s.id));
@@ -39,8 +48,10 @@ function byRange(sessions, events, { from = -Infinity, to = Infinity } = {}) {
 }
 
 export function memoryStore() {
-  const sessions = new Map(); let events = [];
+  const sessions = new Map(), cameras = new Map(); let events = [];
   return {
+    async listCameras() { return copy([...cameras.values()]); },
+    async putCamera(camera) { const value = cameraRecord(camera); cameras.set(value.id,value); },
     async write(session, rows = []) {
       const data = records(session,rows);
       sessions.set(session.id,data.session); events.push(...data.events);
@@ -55,11 +66,12 @@ export function deviceStore() {
   function open() {
     if (!opening) {
       opening = new Promise((resolve,reject) => {
-        const request = indexedDB.open('footfall',1);
+        const request = indexedDB.open('footfall',2);
         request.onupgradeneeded = () => {
           const db = request.result;
-          db.createObjectStore('sessions',{ keyPath: 'id' });
-          db.createObjectStore('events',{ autoIncrement: true }).createIndex('sessionId','sessionId');
+          if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions',{ keyPath: 'id' });
+          if (!db.objectStoreNames.contains('events')) db.createObjectStore('events',{ autoIncrement: true }).createIndex('sessionId','sessionId');
+          if (!db.objectStoreNames.contains('cameras')) db.createObjectStore('cameras',{ keyPath: 'id' });
         };
         request.onsuccess = () => {
           const db = request.result;
@@ -72,19 +84,26 @@ export function deviceStore() {
     }
     return opening;
   }
-  async function transaction(mode, work) {
+  async function transaction(mode, work, names = ['sessions','events']) {
     const db = await open();
     return new Promise((resolve,reject) => {
-      const tx = mode === 'readwrite' ? db.transaction(['sessions','events'],mode,{ durability: 'strict' })
-        : db.transaction(['sessions','events'],mode);
+      const tx = mode === 'readwrite' ? db.transaction(names,mode,{ durability: 'strict' })
+        : db.transaction(names,mode);
       let result;
       tx.oncomplete = () => resolve(typeof result === 'function' ? result() : result);
       tx.onabort = tx.onerror = () => reject(tx.error ?? new Error('Count storage failed'));
-      try { result = work(tx.objectStore('sessions'),tx.objectStore('events')); }
+      try { result = work(...names.map(name => tx.objectStore(name))); }
       catch (error) { tx.abort(); reject(error); }
     });
   }
   return {
+    listCameras() {
+      return transaction('readonly',cameras => { const all = cameras.getAll(); return () => all.result; },['cameras']);
+    },
+    putCamera(camera) {
+      const value = cameraRecord(camera);
+      return transaction('readwrite',cameras => { cameras.put(value); },['cameras']);
+    },
     write(session, rows = []) {
       const data = records(session,rows);
       return transaction('readwrite',(sessions,events) => {
@@ -109,7 +128,7 @@ export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.no
   let open = null, previous = null, lastPicture = null, stampAt = null;
   let chain = Promise.resolve(), eventsKept = 0, asked = false, timer = null;
   function enqueue(work) {
-    chain = chain.then(work).catch(() => { onProblem(saveProblem); });
+    chain = chain.then(work).catch(() => { onProblem(saveProblem); return false; });
     return chain;
   }
   function write(rows = []) {
@@ -141,7 +160,7 @@ export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.no
       const starting = !open;
       if (starting) {
         const { spot,source,label,geometry,inSide,stopSeconds,model } = config;
-        open = { id: uuid(), ...cameraIdentity(spot,source,label), spot,source,
+        open = { id: uuid(), ...(config.camera ? { cameraId: config.camera.id, cameraKey: `cam:${config.camera.id}`, cameraName: config.camera.name } : cameraIdentity(spot,source,label)), spot,source,
           startedAt: at,lastAliveAt: at,endedAt: null,endReason: null,
           geometry: copy(geometry),inSide,stopSeconds,model,totals: next };
         stampAt = at;
@@ -158,6 +177,8 @@ export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.no
     },
     alive,
     end,
+    async listCameras() { await chain; return store.listCameras(); },
+    putCamera(camera) { const value = copy(camera); return enqueue(async () => { await store.putCamera(value); return true; }); },
     async read(range) { await chain; return store.read(range); },
     clear() { return enqueue(async () => { await store.clear(); open = null; previous = null; lastPicture = stampAt = null; cancel(timer); timer = null; }); },
     flushed() { return chain; },
