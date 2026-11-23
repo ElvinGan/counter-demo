@@ -40,6 +40,8 @@ let pictureController = null, runnerNotifications = null;
 let runTimesMs = [], timedModel = null, steppedDown = 0;
 let repeatTask = Promise.resolve();
 let timer = null, videoCallback = null, rateTimer = null, noticeTimer = null;
+const PAINT_WAIT_MS = 250, UNPAINTED_MS = 66;
+let unpainted = false, pictureTicket = 0, wakeLock = null, wakeRequest = null;
 let lastVideoTime = -1, lastRun = -Infinity, lastTime = -Infinity, lastPresentedFrames = 0;
 let countedTimes = [], loadingModel = false, width = 0, height = 0, tableId = 4;
 let freeSince = new Map(), tableRows = new Map(), lastRender = 0;
@@ -151,6 +153,7 @@ Object.defineProperty(window, '__footfall', { value: Object.freeze({
   get model() { return model; }, get picturesCounted() { return picturesCounted; },
   get picturesPerSecond() { return pictureRate(countedTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
   get cameraOn() { return cameraOn && !isVideo(); },
+  get unpainted() { return unpainted; }, get awake() { return Boolean(wakeLock && !wakeLock.released); },
   get source() { return source; }, get videoRepeats() { return isVideo() ? videoRepeats : 0; },
   get steppedDown() { return steppedDown; },
   get sessionId() { return kept.sessionId; }, get eventsKept() { return kept.eventsKept; },
@@ -164,9 +167,24 @@ function announceReset() {
   if (cameraOn) say('The counting area changed, so the counts have started again.',4000);
 }
 function cancelPicture() {
+  pictureTicket++;
   clearTimeout(timer); timer = null;
   if (videoCallback !== null) video.cancelVideoFrameCallback(videoCallback);
   videoCallback = null;
+}
+async function releaseWakeLock(lock) {
+  try { await lock?.release(); } catch {}
+}
+async function stayAwake() {
+  if (!cameraOn || loadingModel || countingPaused || readySince === null || document.visibilityState === 'hidden'
+    || !navigator.wakeLock || (wakeLock && !wakeLock.released) || wakeRequest) return;
+  const request = {}; wakeRequest = request;
+  try {
+    const lock = await navigator.wakeLock.request('screen');
+    // Stop or a new source can overtake a pending request.
+    if (wakeRequest !== request || !cameraOn || document.visibilityState === 'hidden') void releaseWakeLock(lock);
+    else wakeLock = lock;
+  } catch {} finally { if (wakeRequest === request) wakeRequest = null; }
 }
 function show(next) {
   if (screen === 'counting' && next !== 'counting') stopCamera();
@@ -184,6 +202,8 @@ function stopCamera(message = '', reason = 'left') {
   generation++; pictureController?.abort(); pictureController = null; cancelPicture();
   clearInterval(rateTimer); editor.cancelPending();
   cameraOn = false; loadingModel = false; picturesPerSecond = 0; countedTimes = [];
+  unpainted = false; wakeRequest = null;
+  const lock = wakeLock; wakeLock = null; void releaseWakeLock(lock);
   lastVideoTime = -1; lastRun = lastTime = -Infinity; lastPresentedFrames = 0;
   readySince = lastCountAt = null; countingPaused = false;
   if (message) lastProblem = message;
@@ -369,6 +389,7 @@ async function ensureModel(token) {
     clearInterval(rateTimer);
     rateTimer = setInterval(() => { picturesPerSecond = pictureRate(countedTimes,performance.now()/1000); render(); },250);
     schedule(token);
+    void stayAwake();
   });
   modelQueue = pending;
   try { await pending; } catch (error) {
@@ -381,7 +402,10 @@ async function ensureModel(token) {
 }
 function schedule(token) {
   if (token !== generation || !cameraOn || repeating) return;
-  const run = metadata => {
+  const ticket = pictureTicket, callbacks = typeof video.requestVideoFrameCallback === 'function';
+  const run = (metadata, fromTimer) => {
+    if (ticket !== pictureTicket || token !== generation) return;
+    cancelPicture(); unpainted = callbacks && fromTimer;
     const activeRunner = runner;
     frameTask = frame(token,metadata).catch(error => {
       // Restart may already be waiting for this failed run, even after its camera was stopped.
@@ -395,9 +419,8 @@ function schedule(token) {
       say(lastProblem); render(); $('restart-camera').hidden = false;
     });
   };
-  if (typeof video.requestVideoFrameCallback === 'function') {
-    videoCallback = video.requestVideoFrameCallback((now,metadata) => { videoCallback = null; run(metadata); });
-  } else timer = setTimeout(() => { timer = null; run(null); },17);
+  if (callbacks) videoCallback = video.requestVideoFrameCallback((now,metadata) => run(metadata,false));
+  timer = setTimeout(() => run(null,true),callbacks ? (unpainted ? UNPAINTED_MS : PAINT_WAIT_MS) : 17);
 }
 async function frame(token, metadata) {
   if (token !== generation || !cameraOn) return;
@@ -680,6 +703,9 @@ $('own-video').addEventListener('change', () => {
 });
 video.addEventListener('ended', () => { repeatTask = repeatVideo(); });
 video.addEventListener('error', () => { if (cameraOn) stopCamera(isVideo() ? videoError() : 'The camera picture stopped; reconnect the camera and start again.'); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') void stayAwake();
+});
 window.addEventListener('pagehide', () => {
   stopCamera(); ownFile = null;
   modelQueue = modelQueue.catch(() => {}).then(async () => {
