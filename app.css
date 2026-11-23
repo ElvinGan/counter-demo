@@ -155,8 +155,18 @@ dialog{max-height:calc(100% - 24px);overflow-y:auto}
 #history-sessions span,#history-sessions b{display:block}
 #history-sessions span{color:var(--ink2);margin-top:3px}
 #clear-history{font-size:14px}
+#history-bars[data-range="month"] li{grid-template-columns:96px minmax(0,1fr) 38px}
+#history-compare{margin:18px 0}
+#compare-title{font-size:13px;font-weight:600}
+#compare-none{font-size:14px;color:var(--ink2)}
+.vs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));background:var(--canvas);border-radius:16px;box-shadow:var(--card)}
+.vs>div{padding:12px 14px;min-width:0}
+.vs>div+div{border-left:1px solid var(--line)}
+.vs b{display:block;font:800 30px/1 var(--font);font-variant-numeric:tabular-nums;color:var(--ink)}
+.vs span{display:block;font:600 13px/1.25 var(--font);color:var(--ink2);margin-top:4px}
+#compare-before{color:var(--mute)}
 
-/* Named cameras, without setup pictures. */
+/* Named cameras */
 #cameras-screen{max-width:390px;overflow-wrap:anywhere}
 #cameras-title:focus{outline:none}
 #camera-list{list-style:none;padding:0;margin:0}
@@ -182,3 +192,18 @@ dialog{max-height:calc(100% - 24px);overflow-y:auto}
 #history-camera{padding:10px 0 16px;font-size:14px}
 #history-camera p{margin:4px 0}
 #history-none{font-size:14px}
+
+/* Small setup pictures keep their full view and never grow beyond twice their pixels. */
+.setup-row{display:flex;align-items:center;gap:12px;margin:10px 14px;font-size:13px;color:var(--ink2)}
+#setup-state{flex:1;margin:0}
+#setup-preview{width:80px;height:60px;flex:none}
+.camera-thumb,#history-camera-picture{width:84px;height:60px}
+.camera-thumb{float:left;margin:0 10px 6px 0}
+.session-picture{width:72px;height:52px;float:left;margin:0 10px 6px 0}
+#history-sessions li{display:flow-root}
+#setup-preview,.camera-thumb,.session-picture,#history-camera-picture{display:block;object-fit:contain;object-position:center;background:var(--warm);border-radius:8px}
+#history-camera-picture{float:left;margin:0 10px 6px 0}
+#history-camera{display:flow-root}
+#moved-notice{margin:10px 14px;padding:12px;border:2px solid var(--black);border-radius:12px;font-size:14px;background:var(--canvas)}
+#moved-message{margin:0 0 8px;font-weight:600}
+.camera-moved .camera-status::before{width:10px;height:9px;clip-path:polygon(50% 0,100% 100%,0 100%);border-radius:0}

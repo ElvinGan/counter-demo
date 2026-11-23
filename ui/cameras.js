@@ -1,4 +1,5 @@
 import { cameraNameFor, cameraCard, cameraSource, spotTitles, kindNames } from './keep.js';
+import { drawSetup, latestPicture } from './history.js';
 import { saveProblem } from './store.js';
 
 // The active camera survives video try-outs, but only its own source can update it.
@@ -23,7 +24,7 @@ export function cameraBook({ keeper, onProblem, changed = () => {}, now = () => 
       if (!active && make && ['device','wifi'].includes(config.source)) {
         const { spot,source,label,deviceId,geometry,inSide,stopSeconds } = config;
         active = { id: uuid(),name: cameraNameFor(spot,cameras),spot,source,label,deviceId,
-          geometry: structuredClone(geometry),inSide,stopSeconds,createdAt: now(),removedAt: null };
+          geometry: structuredClone(geometry),inSide,stopSeconds,createdAt: now(),removedAt: null,movedAt: null };
         make = false; replace(active); void keeper.putCamera(active);
       }
       return own(config.source) ? active : null;
@@ -34,6 +35,10 @@ export function cameraBook({ keeper, onProblem, changed = () => {}, now = () => 
       const next = { ...active,geometry: structuredClone(geometry),inSide,stopSeconds,label,deviceId };
       if (JSON.stringify(next) === JSON.stringify(active)) return;
       replace(next); void keeper.putCamera(next);
+    },
+    markMoved(source, movedAt) {
+      if (!own(source) || (active.movedAt ?? null) === movedAt) return;
+      const next = { ...active,movedAt }; replace(next); void keeper.putCamera(next);
     },
     async rename(id, text) {
       const name = text.trim().slice(0,40), camera = cameras.find(c => c.id === id);
@@ -53,7 +58,7 @@ export function cameraBook({ keeper, onProblem, changed = () => {}, now = () => 
 
 export function camerasScreen({ book, keeper, start, report, say, root = document, now = () => Date.now(), later = setTimeout, cancel = clearTimeout }) {
   const $ = id => root.getElementById(id);
-  let filter = 'all', sessions = [], events = [], revision = 0, closeMenu = () => {};
+  let filter = 'all', sessions = [], events = [], pictures = [], revision = 0, closeMenu = () => {};
   function node(tag, className, text) {
     const el = root.createElement(tag); el.className = className;
     if (text !== undefined) el.textContent = text;
@@ -74,8 +79,10 @@ export function camerasScreen({ book, keeper, start, report, say, root = documen
     }));
     $('camera-list').replaceChildren(...active.filter(c => filter === 'all' || c.spot === filter).map(camera => {
       const card = cameraCard(camera,sessions,events,{ now: now(),openId: keeper.sessionId });
-      const li = node('li',card.needsYou ? 'needs-you' : ''); li.dataset.camera = camera.id; li.dataset.spot = camera.spot;
+      const li = node('li',card.needsYou ? 'needs-you' : ''); if (camera.movedAt != null) li.className += ' camera-moved'; li.dataset.camera = camera.id; li.dataset.spot = camera.spot;
       const open = button('camera-open','',() => report(`camera:cam:${camera.id}`));
+      const thumb = node('canvas','camera-thumb'), picture = latestPicture(pictures,camera.id);
+      drawSetup(thumb,picture,sessions.find(s => s.id === picture?.sessionId)?.geometry); open.append(thumb);
       open.append(node('b','camera-name',camera.name),node('span','kind',spotTitles[camera.spot]),node('span','src',cameraSource(camera)));
       const menu = node('div','camera-menu'); menu.hidden = true;
       const form = node('form','camera-rename-form'); form.hidden = true;
@@ -116,9 +123,9 @@ export function camerasScreen({ book, keeper, start, report, say, root = documen
     async open() {
       filter = 'all'; const current = ++revision;
       try {
-        const data = await keeper.read();
+        const [data, stills] = await Promise.all([keeper.read(),keeper.listPictures()]);
         if (revision !== current) return;
-        sessions = data.sessions; events = data.events; draw();
+        sessions = data.sessions; events = data.events; pictures = stills; draw();
       } catch { if (revision === current) say('History could not be read on this device. Try opening it again.'); }
     },
   };

@@ -26,10 +26,11 @@ export function cameraCard(camera, sessions, events, { now, openId }) {
   if (latest) {
     const end = sessionEnd(latest,now,openId), time = moment(end.at);
     status = { counting: `Counting since ${moment(latest.startedAt)}`, stopped: `Stopped by you, ${time}`,
-      left: `Stopped, ${time}`, changed: `Stopped, ${time}`, problem: `Stopped by a problem, ${time}`,
+      left: `Stopped, ${time}`, moved: `Stopped, ${time}`, changed: `Stopped, ${time}`, problem: `Stopped by a problem, ${time}`,
       interrupted: `Counting was interrupted, last counted ${time}`, lost: `Stopped without warning, last heard ${time}` }[end.reason];
     needsYou = ['problem','interrupted','lost'].includes(end.reason);
   }
+  if (camera.movedAt != null) { status = `Camera moved ${moment(camera.movedAt)}: check the line`; needsYou = true; }
   const summary = summarise(own,events,{ from: midnight.getTime(),to: now+1,step: DAY,now,openId,spot: camera.spot });
   // A first picture can have an event even before a measurable interval has elapsed.
   const hasToday = summary.coveredMs > 0 || own.some(s => s.startedAt >= midnight.getTime() && s.startedAt <= now)
@@ -87,7 +88,7 @@ export function summarise(sessions, events, { from, to, step, now, openId, spot 
       if (session.startedAt >= end || until < start) continue;
       const changes = relevant.filter(e => e.sessionId === session.id && e.measure === level);
       // An interrupted stretch starts with the previous level, without another event row.
-      const prior = sessions.filter(s => s.cameraKey === session.cameraKey && s.endReason === 'interrupted' && s.startedAt < session.startedAt)
+      const prior = sessions.filter(s => s.cameraKey === session.cameraKey && ['interrupted','moved'].includes(s.endReason) && s.startedAt < session.startedAt)
         .sort((a,b) => b.startedAt-a.startedAt)[0];
       let current = changes[0]?.at === session.startedAt ? changes[0].n : prior?.totals.levels[level] ?? 0;
       for (const event of changes) if (event.at <= start) current = event.n;
@@ -122,6 +123,7 @@ export function clockWords(at) {
 }
 export function endWords(end) {
   return { counting: 'Still counting', stopped: 'Stopped by you', left: 'You left the screen',
+    moved: `Camera moved about ${clockWords(end.movedAt ?? end.at)}, new session started`,
     changed: 'The line or a setting changed', problem: 'Stopped by a problem',
     interrupted: `Counting was interrupted, last counted ${clockWords(end.at)}`,
     lost: `Stopped without warning, last heard ${clockWords(end.at)}` }[end.reason];
@@ -132,12 +134,43 @@ export function sessionWords(session, sessions, events, now, openId) {
   if (session.spot === 'doorway') return `${sums.in} walked in, ${sums.out} walked out`;
   if (session.spot === 'shelf') return `${sums.stops} stopped`;
   const at = sessionEnd(session,now,openId).at;
-  const peak = summarise(sessions.filter(s => s.id === session.id || (s.cameraKey === session.cameraKey && s.endReason === 'interrupted')),
+  const peak = summarise(sessions.filter(s => s.id === session.id || (s.cameraKey === session.cameraKey && ['interrupted','moved'].includes(s.endReason))),
     events.filter(e => e.sessionId === session.id), { from: session.startedAt, to: at+1, step: Math.max(1,at+1-session.startedAt), now, openId, spot: session.spot }).main;
   return session.spot === 'counter' ? `longest queue ${peak}` : `most tables taken ${peak}`;
 }
 
-export function historyReport(sessions, events, { selection, week = false, now, openId, cameras = [] }) {
+function periodSpan(range, now) {
+  const first = new Date(now); first.setHours(0,0,0,0);
+  first.setDate(first.getDate() - (range === 'month' ? 27 : range === 'week' ? 6 : 0));
+  return { from: first.getTime(), to: now+1 };
+}
+
+export function comparePeriods(sessions, events, { spot, range = 'today', now, openId }) {
+  const current = periodSpan(range,now), first = new Date(current.from);
+  first.setDate(first.getDate() - (range === 'month' ? 28 : 7));
+  const previousEnd = new Date(now); previousEnd.setDate(previousEnd.getDate()-7);
+  const before = { from: first.getTime(), to: range === 'today' ? previousEnd.getTime()+1 : current.from };
+  const lastDay = `last ${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][first.getDay()]}`;
+  const words = range === 'today' ? { title: `Today against ${lastDay}`, now: 'today', before: lastDay,
+    missing: `${lastDay} up to this time`, little: 'today' }
+    : range === 'week' ? { title: 'These 7 days against the 7 before', now: 'these 7 days', before: 'the 7 days before',
+      missing: 'in the 7 days before', little: 'in these 7 days' }
+    : { title: 'These 4 weeks against the 4 before', now: 'these 4 weeks', before: 'the 4 weeks before',
+      missing: 'in the 4 weeks before', little: 'in these 4 weeks' };
+  const level = spot === 'counter' || spot === 'tables';
+  function side(span, label) {
+    const summary = summarise(sessions,events,{ ...span,step: Math.max(1,span.to-span.from),spot,now,openId });
+    if (summary.coveredMs < 10*60000) return null;
+    return { text: level ? String(summary.main) : (summary.main/(summary.coveredMs/HOUR)).toFixed(1),
+      label: `${mainLabels[spot]}${level ? '' : ' an hour'}, ${label}` };
+  }
+  const currentSide = side(current,words.now), beforeSide = side(before,words.before);
+  return { title: words.title + (level ? '' : ', for each hour counted'), now: currentSide, before: beforeSide,
+    none: !beforeSide ? `Nothing was counted ${words.missing}, so there is nothing to compare yet.`
+      : !currentSide ? `Too little has been counted ${words.little} to compare yet.` : null };
+}
+
+export function historyReport(sessions, events, { selection, week = false, range = week ? 'week' : 'today', now, openId, cameras = [] }) {
   const newest = [...sessions].sort((a,b) => b.startedAt-a.startedAt);
   const options = Object.entries(groupNames).filter(([spot]) => sessions.some(s => s.spot === spot))
     .map(([spot,label]) => ({ value: `group:${spot}`, label, group: 'A group' }));
@@ -154,32 +187,35 @@ export function historyReport(sessions, events, { selection, week = false, now, 
     status: cameraCard(picked,sessions,events,{now,openId}).status, removed: picked.removedAt !== null } : null;
   const selected = sessions.filter(s => selection === `group:${s.spot}` || selection === `camera:${s.cameraKey}`);
   const spot = picked?.spot ?? selected[0]?.spot ?? 'walkway';
-  const midnight = new Date(now); midnight.setHours(0,0,0,0);
-  const first = new Date(midnight); if (week) first.setDate(first.getDate()-6);
-  const from = first.getTime(), to = now+1;
-  const range = { from,to,now,openId,spot };
-  const summary = summarise(selected,events,{ ...range, step: week ? DAY : HOUR });
-  const list = sessionsInRange(selected,range).sort((a,b) => b.startedAt-a.startedAt);
+  const { from,to } = periodSpan(range,now), first = new Date(from);
+  const span = { from,to,now,openId,spot };
+  const summary = summarise(selected,events,{ ...span, step: Math.max(1,to-from) });
+  const list = sessionsInRange(selected,span).sort((a,b) => b.startedAt-a.startedAt);
   let rows;
-  if (week) {
-    // Local days may be 23 or 25 hours. Keep seven calendar labels through clock changes.
-    rows = Array.from({ length: 7 }, (_,i) => {
-      const day = new Date(first); day.setDate(day.getDate()+i);
-      const next = new Date(day); next.setDate(next.getDate()+1);
+  if (range !== 'today') {
+    // Calendar blocks keep their local midnights through 23- and 25-hour days.
+    const days = range === 'month' ? 7 : 1;
+    const dateWords = date => `${date.getDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][date.getMonth()]}`;
+    rows = Array.from({ length: range === 'month' ? 4 : 7 }, (_,i) => {
+      const day = new Date(first); day.setDate(day.getDate()+i*days);
+      const next = new Date(day); next.setDate(next.getDate()+days);
+      const last = new Date(next); last.setDate(last.getDate()-1);
       const start = day.getTime(), end = Math.min(next.getTime(),to);
-      const value = summarise(selected,events,{ ...range, from: start,to: end,step: next-start });
+      const value = summarise(selected,events,{ ...span, from: start,to: end,step: next-start });
       return { from: start, value: value.main, countedMs: value.coveredMs, fullMs: next-start,
-        label: `${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day.getDay()]} ${day.getDate()}` };
+        label: range === 'month' ? `${dateWords(day)} to ${dateWords(last)}`
+          : `${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day.getDay()]} ${day.getDate()}` };
     });
   } else {
     const earliest = list.length ? Math.max(from,Math.min(...list.map(s => s.startedAt))) : to;
     const start = new Date(earliest); start.setMinutes(0,0,0);
-    rows = summarise(selected,events,{ ...range, from: start.getTime(),to,step: HOUR }).rows
+    rows = summarise(selected,events,{ ...span, from: start.getTime(),to,step: HOUR }).rows
       .map(row => ({ ...row, fullMs: HOUR, label: `${clockWords(row.from)}` }));
   }
   return { ...summary, rows, options, selection, camera, label: mainLabels[spot],
+    compare: comparePeriods(selected,events,{ spot,range,now,openId }),
     covered: `Counted ${durationWords(summary.coveredMs)} in this range${summary.cameras > 1 ? ` across ${summary.cameras} cameras` : ''}`,
     sessions: list.map(s => { const end = sessionEnd(s,now,openId); return { id: s.id,cameraName: saved.find(c => c.id === s.cameraId)?.name ?? s.cameraName,
       time: `${clockWords(s.startedAt)} to ${end.reason === 'counting' ? 'now' : clockWords(end.at)}`,
-      end: endWords(end), totals: sessionWords(s,selected,events,now,openId) }; }) };
+      end: endWords({ ...end,movedAt: s.movedAt }), totals: sessionWords(s,selected,events,now,openId) }; }) };
 }

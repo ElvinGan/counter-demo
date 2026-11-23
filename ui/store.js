@@ -12,7 +12,7 @@ function records(session, events) {
   const only = (value, keys) => {
     if (!value || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw new TypeError('Unknown count field');
   };
-  const fields = ['id','cameraId','cameraKey','cameraName','spot','source','startedAt','lastAliveAt','endedAt','endReason','geometry','inSide','stopSeconds','model','totals'];
+  const fields = ['id','cameraId','cameraKey','cameraName','spot','source','startedAt','lastAliveAt','endedAt','endReason','movedAt','geometry','inSide','stopSeconds','model','totals'];
   if (Object.keys(session).some(key => !fields.includes(key))) throw new TypeError('Unknown session field');
   plain(session);
   only(session.geometry,['line','zone','tables']);
@@ -32,13 +32,23 @@ function records(session, events) {
   return copy({ session, events });
 }
 function cameraRecord(camera) {
-  const keys = ['id','name','spot','source','label','deviceId','geometry','inSide','stopSeconds','createdAt','removedAt'];
+  const keys = ['id','name','spot','source','label','deviceId','geometry','inSide','stopSeconds','createdAt','removedAt','movedAt'];
   if (Object.keys(camera).some(key => !keys.includes(key))) throw new TypeError('Unknown camera field');
   plain(camera);
   if (typeof camera.name !== 'string' || !camera.name.trim() || camera.name.length > 40
       || !['device','wifi'].includes(camera.source)) throw new TypeError('Invalid camera');
   records({ geometry: camera.geometry, totals: { sums: {}, levels: {} } },[]);
   return copy(camera);
+}
+function pictureRecord(picture) {
+  const { width,height,data } = picture;
+  const keys = ['sessionId','cameraId','at','width','height','data','painted'];
+  if (Object.keys(picture).some(key => !keys.includes(key))
+      || !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 160 || height > 160
+      || !(data instanceof Uint8ClampedArray) || data.length !== width*height*4) throw new TypeError('Invalid setup picture');
+  const { data: pixels,...metadata } = picture;
+  plain(metadata);
+  return copy(picture);
 }
 function byRange(sessions, events, { from = -Infinity, to = Infinity } = {}) {
   const selected = sessions.filter(s => s.startedAt <= to && (s.endedAt ?? s.lastAliveAt) >= from);
@@ -48,16 +58,18 @@ function byRange(sessions, events, { from = -Infinity, to = Infinity } = {}) {
 }
 
 export function memoryStore() {
-  const sessions = new Map(), cameras = new Map(); let events = [];
+  const sessions = new Map(), cameras = new Map(), pictures = new Map(); let events = [];
   return {
     async listCameras() { return copy([...cameras.values()]); },
+    async listPictures() { return copy([...pictures.values()]); },
+    async putPicture(picture) { const value = pictureRecord(picture); pictures.set(value.sessionId,value); },
     async putCamera(camera) { const value = cameraRecord(camera); cameras.set(value.id,value); },
     async write(session, rows = []) {
       const data = records(session,rows);
       sessions.set(session.id,data.session); events.push(...data.events);
     },
     async read(range) { return copy(byRange([...sessions.values()],events,range)); },
-    async clear() { sessions.clear(); events = []; },
+    async clear() { sessions.clear(); pictures.clear(); events = []; },
   };
 }
 
@@ -66,11 +78,12 @@ export function deviceStore() {
   function open() {
     if (!opening) {
       opening = new Promise((resolve,reject) => {
-        const request = indexedDB.open('footfall',2);
+        const request = indexedDB.open('footfall',3);
         request.onupgradeneeded = () => {
           const db = request.result;
           if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions',{ keyPath: 'id' });
           if (!db.objectStoreNames.contains('events')) db.createObjectStore('events',{ autoIncrement: true }).createIndex('sessionId','sessionId');
+          if (!db.objectStoreNames.contains('pictures')) db.createObjectStore('pictures',{ keyPath: 'sessionId' });
           if (!db.objectStoreNames.contains('cameras')) db.createObjectStore('cameras',{ keyPath: 'id' });
         };
         request.onsuccess = () => {
@@ -97,6 +110,13 @@ export function deviceStore() {
     });
   }
   return {
+    listPictures() {
+      return transaction('readonly',pictures => { const all = pictures.getAll(); return () => all.result; },['pictures']);
+    },
+    putPicture(picture) {
+      const value = pictureRecord(picture);
+      return transaction('readwrite',pictures => { pictures.put(value); },['pictures']);
+    },
     listCameras() {
       return transaction('readonly',cameras => { const all = cameras.getAll(); return () => all.result; },['cameras']);
     },
@@ -117,7 +137,7 @@ export function deviceStore() {
         return () => byRange(allSessions.result,allEvents.result,range);
       });
     },
-    clear() { return transaction('readwrite',(sessions,events) => { sessions.clear(); events.clear(); }); },
+    clear() { return transaction('readwrite',(sessions,events,pictures) => { sessions.clear(); events.clear(); pictures.clear(); },['sessions','events','pictures']); },
   };
 }
 
@@ -125,7 +145,7 @@ export function deviceStore() {
 export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.now(),
   uuid = () => crypto.randomUUID(), persist = () => globalThis.navigator?.storage?.persist?.(),
   every = setInterval, cancel = clearInterval }) {
-  let open = null, previous = null, lastPicture = null, stampAt = null;
+  let open = null, previous = null, lastPicture = null, stampAt = null, carry = null;
   let chain = Promise.resolve(), eventsKept = 0, asked = false, timer = null;
   function enqueue(work) {
     chain = chain.then(work).catch(() => { onProblem(saveProblem); return false; });
@@ -136,6 +156,7 @@ export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.no
     enqueue(async () => { await store.write(session,events); eventsKept += events.length; });
   }
   function end(reason, at = now()) {
+    carry = null;
     if (!open) return;
     open.endedAt = at; open.endReason = reason; write();
     open = null; previous = null; lastPicture = stampAt = null; cancel(timer); timer = null;
@@ -151,7 +172,7 @@ export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.no
     get eventsKept() { return eventsKept; },
     counted(config, counts, beforeCounts) {
       const at = now();
-      let baseline = previous;
+      let baseline = previous ?? carry; carry = null;
       if (open && at-lastPicture > 30000) {
         baseline = keptMeasures(config.spot,beforeCounts);
         end('interrupted',open.lastAliveAt);
@@ -177,10 +198,21 @@ export function sessionKeeper({ store, onProblem = () => {}, now = () => Date.no
     },
     alive,
     end,
+    moved(movedAt) {
+      if (!open) return;
+      const baseline = previous;
+      open.movedAt = movedAt; end('moved'); carry = baseline;
+    },
+    putPicture(picture) {
+      if (!open) return Promise.resolve(false);
+      const value = copy({ ...picture,sessionId: open.id,cameraId: open.cameraId ?? null });
+      return enqueue(async () => { await store.putPicture(value); return true; });
+    },
+    async listPictures() { await chain; return store.listPictures(); },
     async listCameras() { await chain; return store.listCameras(); },
     putCamera(camera) { const value = copy(camera); return enqueue(async () => { await store.putCamera(value); return true; }); },
     async read(range) { await chain; return store.read(range); },
-    clear() { return enqueue(async () => { await store.clear(); open = null; previous = null; lastPicture = stampAt = null; cancel(timer); timer = null; }); },
+    clear() { return enqueue(async () => { await store.clear(); open = null; previous = carry = null; lastPicture = stampAt = null; cancel(timer); timer = null; }); },
     flushed() { return chain; },
   };
 }

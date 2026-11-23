@@ -7,7 +7,9 @@ import { pictureRate, fallbackNewPicture, containedPicture } from './ui/pictures
 import { clips } from './videos/clips.js';
 import { clipGeometry, repeatTimeline } from './ui/video.js';
 import { deviceStore, sessionKeeper } from './ui/store.js';
-import { historyScreen } from './ui/history.js';
+import { smallSize, viewWatch, SAMPLES } from './ui/setup.js';
+import { clockWords } from './ui/keep.js';
+import { historyScreen, drawSetup } from './ui/history.js';
 import { cameraBook, camerasScreen } from './ui/cameras.js';
 const $ = id => document.getElementById(id);
 const video = $('video'), overlay = $('overlay');
@@ -17,6 +19,11 @@ let modelChosen = Object.hasOwn(modelSizes, params.get('model'));
 let model = modelChosen ? params.get('model') : undefined;
 let stopSeconds = [5,10,30,60].includes(Number(params.get('stop'))) ? Number(params.get('stop')) : 10;
 const defaultStopSeconds = stopSeconds;
+const checkValue = Number(params.get('check'));
+const checkSeconds = checkValue >= 5 && checkValue <= 600 ? checkValue : 60;
+const watch = viewWatch({ checkSeconds });
+let setupSession = null, setupPicture = null, adoptedPicture = null, quickMovedAt = null, setupFailed = false, sampledAt = -Infinity;
+const smallCanvas = document.createElement('canvas'), smallContext = smallCanvas.getContext('2d', { willReadFrequently: true });
 let startSource = params.get('source') === 'test' ? 'test' : 'device';
 let ownFile = null, ownURL = null, videoRepeats = 0, engineOffset = 0, repeating = false;
 const isVideo = () => source === 'test' || source === 'file';
@@ -56,6 +63,60 @@ function cameraHeading() {
 function keepCount(before) {
   const config = cameraConfig(), camera = book.counted(config);
   cameraHeading(); kept.counted({ ...config,camera },counts,before);
+  if (setupSession !== kept.sessionId) {
+    setupSession = kept.sessionId; setupPicture = null; setupFailed = false;
+    if (adoptedPicture) {
+      watch.adopt(adoptedPicture); saveSetup(adoptedPicture); adoptedPicture = null;
+    } else watch.reset();
+    renderSetup();
+  }
+}
+function movedFlag() { return book.own(source) ? book.active.movedAt ?? null : quickMovedAt; }
+function renderSetup() {
+  $('setup-state').textContent = setupPicture ? 'Setup picture kept on this device, people painted out.'
+    : setupFailed ? 'Setup picture could not be saved on this device.'
+    : `Building the setup picture: ${SAMPLES-watch.count} s left`;
+  $('setup-preview').hidden = !setupPicture;
+  const movedAt = movedFlag();
+  $('moved-notice').hidden = movedAt === null;
+  $('moved-message').textContent = movedAt === null ? '' : `The camera moved at ${clockWords(movedAt)}. Check the line.`;
+}
+function clearMoved() {
+  if (book.own(source)) book.markMoved(source,null); else quickMovedAt = null;
+  renderSetup();
+}
+function resetSetup() {
+  watch.reset(); setupFailed = false; setupSession = setupPicture = adoptedPicture = null; sampledAt = -Infinity; renderSetup();
+}
+function saveSetup(picture) {
+  const id = kept.sessionId, savedGeometry = structuredClone(geometry);
+  void kept.putPicture(picture).then(ok => {
+    if (kept.sessionId !== id) return;
+    if (!ok) { setupFailed = true; renderSetup(); return; }
+    setupPicture = picture; drawSetup($('setup-preview'),picture,savedGeometry); renderSetup();
+  });
+}
+function captureSetup() {
+  const size = smallSize(width,height);
+  smallCanvas.width = size.width; smallCanvas.height = size.height;
+  smallContext.save();
+  if (mirrored) { smallContext.translate(size.width,0); smallContext.scale(-1,1); }
+  smallContext.drawImage(video,0,0,size.width,size.height); smallContext.restore();
+  return { ...size,data: smallContext.getImageData(0,0,size.width,size.height).data };
+}
+function sampleSetup(sample, detections) {
+  if (!sample) return;
+  sampledAt = performance.now();
+  const boxes = detections.map(p => ({ x: p.x1*sample.width/width,y: p.y1*sample.height/height,
+    w: (p.x2-p.x1)*sample.width/width,h: (p.y2-p.y1)*sample.height/height }));
+  const at = Date.now(), result = watch.sample(sample,boxes,at);
+  if (result?.kind === 'picture') saveSetup({ ...result.picture,at });
+  if (result?.kind === 'moved') {
+    kept.moved(result.movedAt); adoptedPicture = { ...result.picture,at }; setupPicture = null;
+    if (book.own(source)) book.markMoved(source,result.movedAt); else quickMovedAt = result.movedAt;
+    say(`The camera moved at ${clockWords(result.movedAt)}; check the line.`);
+  }
+  renderSetup();
 }
 function openCameras() {
   stopCamera(); book.begin(); ownFile = null; show('cameras'); say(''); void cameraList.open();
@@ -83,6 +144,9 @@ function freezeSnapshot(value) {
 Object.defineProperty(window, '__footfall', { value: Object.freeze({
   get ready() { return ready; }, get cameraId() { return screen === 'counting' ? book.active?.id ?? null : null; },
   get cameraCount() { return book.count; },
+  get setupPicture() { return kept.sessionId && setupPicture ? Object.freeze({ width: setupPicture.width,height: setupPicture.height,painted: setupPicture.painted,at: setupPicture.at }) : null; },
+  get movedAt() { return screen === 'counting' ? movedFlag() : null; },
+  get viewScore() { return watch.score; }, get checkSeconds() { return checkSeconds; },
   get screen() { return screen; }, get spot() { return spot; }, get backend() { return backend; },
   get model() { return model; }, get picturesCounted() { return picturesCounted; },
   get picturesPerSecond() { return pictureRate(countedTimes,performance.now()/1000); }, get counts() { return freezeSnapshot(counts); },
@@ -116,7 +180,7 @@ function show(next) {
   heading.tabIndex = -1; heading.focus();
 }
 function stopCamera(message = '', reason = 'left') {
-  kept.end(message ? 'problem' : reason);
+  kept.end(message ? 'problem' : reason); resetSetup();
   generation++; pictureController?.abort(); pictureController = null; cancelPicture();
   clearInterval(rateTimer); editor.cancelPending();
   cameraOn = false; loadingModel = false; picturesPerSecond = 0; countedTimes = [];
@@ -135,7 +199,9 @@ function stopCamera(message = '', reason = 'left') {
   say(message);
   return generation;
 }
-function resetCounts(announce = false) {
+function resetCounts(announce = false, lineChanged = false) {
+  if (lineChanged) clearMoved();
+  resetSetup();
   if (cameraOn) { kept.end('changed'); book.update(cameraConfig()); }
   revision++; tracker = new Tracker(); people = [];
   counter = makeCounters(spot, pixelGeometry(geometry,width || 1280,height || 720),stopSeconds,inSide);
@@ -144,7 +210,7 @@ function resetCounts(announce = false) {
   render(); draw();
 }
 function draw() { if (overlay.width && spot) drawOverlay(overlay,geometry,people,counts,spot,inSide); }
-const editor = geometryEditor($('handles'), () => geometry, first => resetCounts(first), value => { editing = value; }, announceReset);
+const editor = geometryEditor($('handles'), () => geometry, first => resetCounts(first,true), value => { editing = value; }, announceReset);
 function metric(one,labelOne,detailOne,two,labelTwo,detailTwo) {
   $('count-one').textContent = one; $('label-one').textContent = labelOne; $('detail-one').textContent = detailOne;
   $('count-two').textContent = two; $('label-two').textContent = labelTwo; $('detail-two').textContent = detailTwo;
@@ -161,7 +227,7 @@ function renderTables() {
       tile.className = 'tile'; tile.textContent = table.id; body.append(state,detail);
       remove.type = 'button'; remove.className = 'remove'; remove.textContent = 'Remove'; remove.setAttribute('aria-label',`Remove table ${table.id}`);
       remove.addEventListener('click', () => {
-        geometry.tables = geometry.tables.filter(t => t.id !== table.id); editor.rebuild(); resetCounts(true);
+        geometry.tables = geometry.tables.filter(t => t.id !== table.id); editor.rebuild(); resetCounts(true,true);
       });
       li.append(tile,body,duration,remove); $('table-list').append(li);
       row = { li,tile,state,detail,duration }; tableRows.set(table.id,row);
@@ -207,7 +273,7 @@ function render() {
   $('backend-label').textContent = runner && !loadingModel ? `Using ${backend === 'webgpu' ? 'WebGPU' : 'WASM'}.` : 'Counter is getting ready.';
 }
 function configureSpot(next) {
-  spot = next;
+  spot = next; quickMovedAt = null;
   const clip = source === 'test' ? clips[spot] : null;
   geometry = clipGeometry(spot, clip?.geometry); inSide = clip?.inSide ?? 1;
   stopSeconds = clip?.stopSeconds ?? defaultStopSeconds;
@@ -348,7 +414,7 @@ async function frame(token, metadata) {
   lastTime = t;
   resizePicture();
   const frameRevision = revision, frameModel = model, currentRunner = runner;
-  let ratio;
+  let ratio, smallPicture;
   // A fallback can change input size (Most accurate to Fastest), so capture again for that session.
   const prepare = () => {
     input.width = currentRunner.inputW; input.height = currentRunner.inputH;
@@ -358,6 +424,8 @@ async function frame(token, metadata) {
     inputContext.save();
     if (mirrored) { inputContext.translate(box.drawW,0); inputContext.scale(-1,1); }
     inputContext.drawImage(video,0,0,box.drawW,box.drawH); inputContext.restore();
+    // Capture alongside the detector input, before its async run can advance the video.
+    if (performance.now()-sampledAt >= 1000) smallPicture = captureSetup();
     return rgbaToTensor(inputContext.getImageData(0,0,input.width,input.height).data,input.width,input.height);
   };
   let raw;
@@ -369,9 +437,10 @@ async function frame(token, metadata) {
   if (frameRevision !== revision || video.videoWidth !== width || video.videoHeight !== height) { schedule(token); return; }
   if (modelChanged) resetCounts();
   const beforeCounts = counts;
-  people = tracker.update(decodeYolox(raw,{ inputW: input.width,inputH: input.height,ratio }),t);
+  const detections = decodeYolox(raw,{ inputW: input.width,inputH: input.height,ratio });
+  people = tracker.update(detections,t);
   counter.update(people,t); counts = counter.snapshot();
-  keepCount(beforeCounts); picturesCounted++;
+  keepCount(beforeCounts); picturesCounted++; sampleSetup(smallPicture,detections);
   const finished = performance.now()/1000; lastCountAt = finished;
   countedTimes = countedTimes.filter(time => time > finished-3); countedTimes.push(finished);
   picturesPerSecond = pictureRate(countedTimes,finished);
@@ -460,8 +529,8 @@ function updateStartSource() {
   $('use-camera').setAttribute('aria-pressed', String(startSource === 'device'));
   $('use-test').setAttribute('aria-pressed', String(startSource === 'test'));
   $('source-promise').textContent = startSource === 'test'
-    ? 'Plays a test video in this page. No pictures are kept and nothing leaves this device. Counts are kept on this device.'
-    : "Uses this device's camera. No pictures are kept and nothing leaves this device. Counts are kept on this device.";
+    ? 'Plays a test video in this page. No video is kept and nothing leaves this device. Counts and one setup picture, with people painted out, are kept on this device.'
+    : "Uses this device's camera. No video is kept and nothing leaves this device. Counts and one setup picture, with people painted out, are kept on this device.";
   for (const button of document.querySelectorAll('.spot[data-spot]')) {
     const small = button.querySelector('small');
     button.dataset.description ??= small.textContent;
@@ -588,8 +657,9 @@ $('switch-camera').addEventListener('click', () => {
 });
 $('stop-seconds').value = stopSeconds; $('model-choice').value = model ?? 's';
 $('stop-seconds').addEventListener('change', () => { stopSeconds = Number($('stop-seconds').value); resetCounts(); if (cameraOn) say('The seconds setting changed, so the counts have started again.',4000); });
-$('flip-inside').addEventListener('click', () => { inSide *= -1; resetCounts(true); });
-$('add-table').addEventListener('click', () => { const table = { id: ++tableId,section: 'Room',...nextTableBox(geometry.tables) }; geometry.tables.push(table); editor.rebuild(); editor.select(table); resetCounts(true); });
+$('moved-ok').addEventListener('click',clearMoved);
+$('flip-inside').addEventListener('click', () => { inSide *= -1; resetCounts(true,true); });
+$('add-table').addEventListener('click', () => { const table = { id: ++tableId,section: 'Room',...nextTableBox(geometry.tables) }; geometry.tables.push(table); editor.rebuild(); editor.select(table); resetCounts(true,true); });
 $('more').addEventListener('click', () => {
   if (typeof $('more-sheet').showModal !== 'function') { say('This browser cannot open the controls; use a current browser and try again.'); return; }
   render(); $('more-sheet').showModal();
